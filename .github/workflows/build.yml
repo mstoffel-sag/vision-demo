@@ -1,0 +1,90 @@
+name: build
+
+# Compiles otc_capture for amd64 and arm64 using the native Optris SDK.
+#
+# Each architecture builds natively (GitHub provides both x86_64 and arm64
+# Linux runners), installing the matching Optris Thermal Camera SDK .deb from
+# the public release assets before compiling.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  SDK_VERSION: "11.3.0"
+  UBUNTU_RELEASE: "24.04"   # which otcsdk ubuntu build to use (22.04 or 24.04)
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Optris SDK (${{ matrix.arch }})
+        run: |
+          DEB="otcsdk-${SDK_VERSION}-ubuntu-${UBUNTU_RELEASE}-${{ matrix.arch }}.deb"
+          URL="https://github.com/Optris/otcsdk_downloads/releases/download/v${SDK_VERSION}/${DEB}"
+          echo "Downloading $URL"
+          wget -q "$URL"
+
+      - name: Install SDK and build dependencies
+        run: |
+          DEB="otcsdk-${SDK_VERSION}-ubuntu-${UBUNTU_RELEASE}-${{ matrix.arch }}.deb"
+          sudo apt-get update
+          # Installing the .deb pulls in its runtime/build dependencies (libusb, libudev, ...).
+          sudo apt-get install -y "./${DEB}" build-essential zlib1g-dev
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Verify binary architecture
+        run: file ./otc_capture
+
+      - name: Rename for artifact
+        run: mv otc_capture "otc_capture-linux-${{ matrix.arch }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: otc_capture-linux-${{ matrix.arch }}
+          path: otc_capture-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    # Only run when a version tag (v*) is pushed.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # required to create the release and upload assets
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Create/update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/otc_capture-linux-*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
