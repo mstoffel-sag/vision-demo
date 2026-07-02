@@ -240,7 +240,9 @@ static void usage(const char* prog)
       "  --interval-ms MS   Delay between captures (default 1000)\n"
       "  --timeout-s S      Seconds to wait for valid data (default 30)\n"
       "  --csv              Also write per-pixel temperatures as CSV\n"
-      "  --raw              Also write raw float32 temperatures (.f32)\n",
+      "  --raw              Also write raw float32 temperatures (.f32)\n"
+      "  --fast-start       Skip startup recalibration for a quicker first frame\n"
+      "                     (less accurate initially; good for a fast snapshot)\n",
       prog);
 }
 
@@ -252,7 +254,7 @@ int main(int argc, char** argv)
   int count = 1;
   int interval_ms = 1000;
   int timeout_s = 30;
-  bool csv = false, raw = false;
+  bool csv = false, raw = false, fast_start = false;
 
   for (int i = 1; i < argc; ++i)
   {
@@ -266,6 +268,7 @@ int main(int argc, char** argv)
     else if (a == "--timeout-s") timeout_s = std::atoi(next());
     else if (a == "--csv") csv = true;
     else if (a == "--raw") raw = true;
+    else if (a == "--fast-start") fast_start = true;
     else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
     else { std::fprintf(stderr, "Unknown argument: %s\n", a.c_str()); usage(argv[0]); return 2; }
   }
@@ -285,9 +288,16 @@ int main(int argc, char** argv)
 
   // Wait until a valid (flag-open) frame is available.
   FrameEvent evt;
+  bool skipped = false;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
   while (!client->takeReadyFrame(evt))
   {
+    // Optionally skip the per-run startup recalibration so the first frame is
+    // ready sooner. Only has an effect while a startup calibration is active,
+    // so retry until it reports success. Trades initial accuracy for speed.
+    if (fast_start && !skipped)
+      skipped = client->imager().skipStartupCalibration();
+
     if (std::chrono::steady_clock::now() > deadline)
     {
       std::fprintf(stderr, "Timed out waiting for valid thermal data.\n");
