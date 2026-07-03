@@ -177,6 +177,22 @@ static void save_frame(const FrameEvent& evt, const std::string& prefix, bool cs
 
   // 1) False-color picture -> PNG.
   ImageBuilder builder(ColorFormat::RGB, WidthAlignment::OneByte);
+  // Plain MinMax scaling (the ImageBuilder default) stretches the palette across the
+  // single hottest and coldest pixel in the frame. A tiny hotspot (a reflection, an LED,
+  // an exposed heating element) then pins the top of the range and crushes the rest of
+  // the scene into the dark end of the palette. Sigma3 derives the range from the
+  // mean +/- 3 standard deviations instead, which stays robust to a few outlier pixels.
+  builder.setTemperatureScalingMode(TemperatureScalingMode::Sigma3);
+  // The low-pass filter (default factor 0.96) smooths the scaling range across
+  // consecutive frames of a live video feed, but a brand-new ImageBuilder is
+  // constructed per saved frame here, so it always starts from the hardcoded
+  // seed range of -20..20 C. Increasing the max is applied instantly, but
+  // increasing the min is throttled, so for any scene warmer than 20 C the min
+  // stays pinned near -20 C while the max jumps to the real value -- crushing
+  // the real temperature spread into a thin sliver at the bright end of the
+  // palette (a near-uniform, washed-out image). Disabling the filter makes
+  // this one-shot capture use the frame's true range immediately.
+  builder.setTemperatureScalingFilterFactor(0.0f);
   builder.setThermalFrame(tf);
   builder.convertTemperatureToPaletteImage();
 

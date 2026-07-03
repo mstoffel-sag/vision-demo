@@ -1,0 +1,44 @@
+{
+  "_comment_runner": "--- Runner settings (usually no changes needed) ---",
+  "pipeline_name": "thermal-optris-monitoring",
+  "capture_interval_sec": 30,
+
+  "preprocessor_path": "/opt/tedge-pipeline/processors/preprocessor.py",
+  "postprocessor_path": "/opt/tedge-pipeline/processors/postprocessor.py",
+  "model_path": "/opt/tedge-pipeline/models/model.onnx",
+  "data_dir": "/opt/tedge-pipeline/data",
+
+  "mqtt_host": "localhost",
+  "mqtt_port": 1883,
+  "service_name": "tedge-pipeline-runner",
+
+  "settings": {
+    "_comment_device": "--- CUSTOMIZE: identify your device and equipment ---",
+    "device_id": "edge-gw-001",
+    "device_name": "Plant Floor Gateway 01",
+    "location": "Building A, Line 2",
+    "equipment_id": "MOTOR-L2-007",
+    "equipment_name": "Drive Motor Unit 07",
+    "camera_model": "Optris Xi410",
+
+    "_comment_capture": "--- otc_capture settings (github.com/mstoffel-sag/vision-demo) ---",
+    "capture_binary": "/usr/local/bin/otc_capture",
+    "capture_network": "192.168.0.0/24",
+    "camera_serial": 0,
+    "capture_timeout_s": 60,
+    "keep_frames": 5,
+
+    "_comment_model": "--- Model parameters (match your ONNX model / camera resolution) ---",
+    "frame_width": 384,
+    "frame_height": 240,
+    "temp_threshold_celsius": 30.0,
+    "grid_rows": 6,
+    "grid_cols": 8,
+
+    "_comment_events": "--- Cumulocity event/alarm settings ---",
+    "c8y_event_type": "c8y_ThermalAlert",
+    "c8y_event_text": "Thermal threshold exceeded on monitored equipment",
+    "c8y_alarm_type": "c8y_ThermalAlarm",
+    "c8y_alarm_severity": "major"
+  }
+}

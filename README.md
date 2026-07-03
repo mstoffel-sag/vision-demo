@@ -25,6 +25,7 @@ Verified against a **Xi410** (S/N 26054106) at `192.168.0.101:50101`,
 | `build.sh` | Compiles `otc_capture.cpp` → `otc_capture`. |
 | `otc_capture` | Compiled binary you run directly. |
 | `captures/` | Output images and temperature data. |
+| `pipeline/` | Optional Cumulocity thermal-alert pipeline — see [below](#cumulocity-thermal-alert-pipeline-optional). |
 
 ---
 
@@ -202,6 +203,118 @@ otc_find_devices -e -a 192.168.0.0/24
 
 ---
 
+## Cumulocity thermal-alert pipeline (optional)
+
+`pipeline/` turns `otc_capture` into a monitoring service: on a fixed interval it
+captures a frame, runs it through a tiny ONNX model, and — if any grid cell
+exceeds a configured temperature threshold — raises a Cumulocity alarm and
+uploads an annotated snapshot as a `c8y_ThermalAlert` event.
+
+It runs on top of **[tedge-pipeline-runner](https://github.com/Cumulocity-IoT/onnx-pipeline-runner)**,
+a generic `Preprocess → ONNX inference → Postprocess` engine for thin-edge.io.
+That runner is generic infrastructure you install once; everything in
+`pipeline/` is what plugs into it to make this specific Optris + Cumulocity
+use case work.
+
+| File | Purpose |
+|------|---------|
+| `pipeline/config/pipeline.json` | Device/equipment info, capture settings, alert threshold. |
+| `pipeline/processors/preprocessor.py` | Runs `otc_capture` once per cycle, loads the `_temp.csv` into a tensor. |
+| `pipeline/processors/postprocessor.py` | Applies the threshold, renders the annotated alert image, publishes to Cumulocity. |
+| `pipeline/build_thermal_model.py` | Builds `model.onnx` — feature extraction only (smoothing + per-cell max/average), no threshold logic. |
+
+`model.onnx` itself is **not** checked into the repo — it's built by CI from
+`build_thermal_model.py` and attached to each [GitHub
+Release](../../releases), so it's always in sync with that script. Grab it
+from there, or build it yourself:
+
+```bash
+pip install numpy   # onnxruntime too, if you want the self-validation step
+python3 pipeline/build_thermal_model.py --height 240 --width 384 \
+    --grid-rows 6 --grid-cols 8 --output pipeline/model.onnx
+```
+
+### Prerequisites
+
+- A device running [thin-edge.io](https://thin-edge.github.io/thin-edge.io/), connected to Cumulocity.
+- `otc_capture` built and installed on that same device (see above) — the
+  camera capture path this pipeline depends on.
+- `tedge-pipeline-runner` installed on the device (see the
+  [onnx-pipeline-runner Quick Start](https://github.com/Cumulocity-IoT/onnx-pipeline-runner#quick-start)):
+  build `tedge-pipeline-runner_*.deb` from that repo, upload it to
+  **Management > Software Repository** in Cumulocity, then install it on the
+  device from its **Software** tab. This creates `/opt/tedge-pipeline/` and
+  the `tedge-pipeline-runner` systemd service.
+- `python3-numpy` and `python3-matplotlib` on the device (the runner's `.deb`
+  installs these automatically; install manually only if you skip it):
+  ```bash
+  sudo apt install python3-numpy python3-matplotlib
+  ```
+
+### Deploying the pipeline files
+
+**Production (recommended):** push the four files below via Cumulocity's
+**Configuration** tab on the device — no SSH needed, and future updates work
+the same way. Get `model.onnx` from the [latest
+Release](../../releases/latest) (or build it yourself, above):
+
+| Configuration Type | File to upload |
+|---|---|
+| `pipeline-config` | `pipeline/config/pipeline.json` |
+| `pipeline-preprocessor` | `pipeline/processors/preprocessor.py` |
+| `pipeline-postprocessor` | `pipeline/processors/postprocessor.py` |
+| `pipeline-model` | `model.onnx` (from the Release, or built locally) |
+
+**Manual (for local testing/dev boxes without Configuration Management set up):**
+
+```bash
+sudo install -m 0644 -o root -g root pipeline/config/pipeline.json      /opt/tedge-pipeline/config/pipeline.json
+sudo install -m 0644 -o root -g root pipeline/processors/preprocessor.py /opt/tedge-pipeline/processors/preprocessor.py
+sudo install -m 0644 -o root -g root pipeline/processors/postprocessor.py /opt/tedge-pipeline/processors/postprocessor.py
+sudo install -m 0644 -o root -g root model.onnx                          /opt/tedge-pipeline/models/model.onnx
+
+sudo systemctl restart tedge-pipeline-runner.service
+sudo systemctl status tedge-pipeline-runner.service --no-pager
+journalctl -u tedge-pipeline-runner.service -f    # watch a full cycle
+```
+
+### Before you deploy, edit `pipeline/config/pipeline.json`
+
+The checked-in file has placeholder equipment info and paths — set at least:
+
+| Setting | Meaning |
+|---|---|
+| `capture_binary` | Path to `otc_capture` (e.g. `/usr/local/bin/otc_capture`). |
+| `capture_network` / `camera_serial` | Same as the `--network` / `--serial` capture options. |
+| `frame_width` / `frame_height` | Must match the camera's native resolution and the resolution `model.onnx` was built for (384×240 for the Xi410 above). |
+| `temp_threshold_celsius` | Grid-cell mean temperature (°C) that triggers an alert. |
+| `equipment_id`, `equipment_name`, `location`, `camera_model` | Attached to every alert event/alarm. |
+| `c8y_event_type`, `c8y_alarm_type`, `c8y_alarm_severity` | Cumulocity event/alarm types raised on alert. |
+
+If you change `frame_width`/`frame_height` or the alert grid resolution,
+rebuild the model to match:
+
+```bash
+python3 pipeline/build_thermal_model.py --height 240 --width 384 \
+    --grid-rows 6 --grid-cols 8 --output pipeline/model.onnx
+```
+
+### How an alert looks
+
+Each cycle, `preprocessor.py` runs `otc_capture --count 1 --csv` and feeds the
+per-pixel temperature CSV into `model.onnx`. If any grid cell's average
+exceeds `temp_threshold_celsius`, `postprocessor.py`:
+
+1. Renders the full frame with `matplotlib` (`inferno` colormap, scaled to
+   that frame's own 1st/99th-percentile temperatures — not a fixed range, so
+   the background stays visible instead of clipping to black) with a red box
+   and `+` marker over the hottest grid cell.
+2. Uploads it via `tedge upload c8y` as a `c8y_ThermalAlert` event, and raises
+   a `c8y_ThermalAlarm` that clears automatically once the temperature drops
+   back below threshold.
+
+---
+
 ## Troubleshooting
 
 - **`Timed out waiting for valid thermal data`** — camera not reachable or wrong
@@ -215,3 +328,34 @@ otc_find_devices -e -a 192.168.0.0/24
   optris.otcsdk`) crashes in `Sdk.init()` under Python 3.14 on this system. The
   native C++ path used here is unaffected. If you need Python, run it under the
   Python version the binding was built against, or report the crash to Optris.
+- **`otc_capture` PNG is a flat, near-uniform color — no visible detail** — the
+  `ImageBuilder` auto-scaling filter starts every frame from a hardcoded
+  `-20..20 °C` seed range and only converges slowly (see `otc_capture.cpp`,
+  `save_frame()`). For scenes well outside that range, or with a single
+  outlier hot pixel, this crushes real detail into a thin sliver of the
+  palette. `otc_capture.cpp` already sets `Sigma3` scaling and disables the
+  filter (`setTemperatureScalingFilterFactor(0.0f)`) to avoid this — if you
+  see it regardless, check you're running the binary built from the current
+  `otc_capture.cpp`, not an older prebuilt one.
+- **`--fast-start` gives wildly wrong absolute temperatures** — it skips the
+  startup NUC/recalibration for a faster first frame, at the documented cost
+  of accuracy. We measured the same static scene reading ~120 °C with
+  `--fast-start` vs. ~25 °C without it. Don't use it for anything that reads
+  absolute temperatures (including the `pipeline/` alert threshold) — it's
+  only reasonable for a quick "is the camera even connected" sanity check.
+- **Cumulocity alert image background is solid black** — this is a
+  `postprocessor.py` rendering issue, not `otc_capture`: an earlier version
+  used a fixed `vmin`/`vmax` color range that sat above typical ambient
+  temperature, so `matplotlib` clipped the whole background to black and only
+  the already-flagged hot region showed any color. The current version scales
+  off each frame's own 1st/99th-percentile temperatures instead. If you still
+  see this, confirm `/opt/tedge-pipeline/processors/postprocessor.py` matches
+  `pipeline/processors/postprocessor.py` in this repo (Configuration
+  Management pushes and manual `scp`/`cp` deploys are easy to let drift out of
+  sync) and that the service was restarted after the update.
+- **Device claim: `busy with another client`** — another client (another
+  workstation, a viewer app, or an unclean previous exit) is already holding
+  the camera's connection. `otc_find_devices` reporting `available` doesn't
+  always mean the SDK's own claim tracking agrees. Close whatever else is
+  connected; if nothing obvious is, power-cycling the camera clears a stuck
+  claim.

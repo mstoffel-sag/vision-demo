@@ -1,10 +1,13 @@
 name: build
 
-# Compiles otc_capture for amd64 and arm64 using the native Optris SDK.
+# Compiles otc_capture for amd64 and arm64 using the native Optris SDK, and
+# builds pipeline/model.onnx from pipeline/build_thermal_model.py.
 #
 # Each architecture builds natively (GitHub provides both x86_64 and arm64
 # Linux runners), installing the matching Optris Thermal Camera SDK .deb from
-# the public release assets before compiling.
+# the public release assets before compiling. model.onnx is generated at
+# build time rather than checked into the repo, so it's always in sync with
+# build_thermal_model.py and the frame size/grid below.
 
 on:
   push:
@@ -77,9 +80,41 @@ jobs:
           path: otc_capture-linux-${{ matrix.arch }}
           if-no-files-found: error
 
+  model:
+    name: build model
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install numpy onnxruntime
+
+      - name: Build ONNX model
+        # Resolution/grid must match pipeline/config/pipeline.json
+        # (frame_width/frame_height, grid_rows/grid_cols) and the Xi410's
+        # native 384x240 output. build_thermal_model.py self-validates with
+        # onnxruntime when it's installed.
+        run: |
+          python3 pipeline/build_thermal_model.py \
+            --height 240 --width 384 --grid-rows 6 --grid-cols 8 \
+            --output model.onnx
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model.onnx
+          path: model.onnx
+          if-no-files-found: error
+
   release:
     name: release
-    needs: build
+    needs: [build, model]
     # Only run when a version tag (v*) is pushed.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
@@ -98,6 +133,8 @@ jobs:
       - name: Create/update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/otc_capture-linux-*
+          files: |
+            dist/otc_capture-linux-*
+            dist/model.onnx
           fail_on_unmatched_files: true
           generate_release_notes: true
