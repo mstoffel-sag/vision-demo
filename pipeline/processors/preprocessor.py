@@ -19,6 +19,11 @@ Data source:
 Settings (config["settings"]):
     capture_binary        str   - path to the otc_capture executable (default: "otc_capture")
     capture_network       str   - Ethernet CIDR to scan (default: "192.168.0.0/24")
+    camera_ip             str   - if set, connect directly to this camera IP and skip
+                                  the subnet scan (needs camera_serial != 0). Use when
+                                  discovery/broadcast can't reach the camera, e.g. on a
+                                  routed or macvlan Docker network. (default: "" = scan)
+    camera_port           int   - local UDP port the camera streams to (default: 50101)
     camera_serial         int   - camera serial, 0 = first detected (default: 0)
     capture_timeout_s     int   - seconds to wait for valid thermal data (default: 30)
     keep_frames           int   - how many past capture sets to retain on disk (default: 5)
@@ -56,12 +61,20 @@ def _run_capture(settings, out_dir):
     cmd = [
         binary,
         "--outdir", str(out_dir),
-        "--network", settings.get("capture_network", "192.168.0.0/24"),
         "--serial", str(settings.get("camera_serial", 0)),
         "--timeout-s", str(timeout_s),
         "--count", "1",
         "--csv",
     ]
+
+    # If a camera IP is configured, connect directly (no subnet scan) — needed
+    # when discovery/broadcast can't reach the camera, e.g. across a routed or
+    # macvlan Docker network. Otherwise fall back to scanning capture_network.
+    camera_ip = str(settings.get("camera_ip", "")).strip()
+    if camera_ip:
+        cmd += ["--ip", camera_ip, "--port", str(settings.get("camera_port", 50101))]
+    else:
+        cmd += ["--network", settings.get("capture_network", "192.168.0.0/24")]
 
     before = {p.name for p in out_dir.glob("*_temp.csv")}
 

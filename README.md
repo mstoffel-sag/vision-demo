@@ -90,6 +90,7 @@ sudo cp otc_capture /usr/local/bin/
 ./otc_capture --outdir captures --csv --raw                    # also dump temperature data
 ./otc_capture --outdir captures --serial 26054106              # target a specific camera
 ./otc_capture --outdir captures --network 10.0.0.0/24          # a different subnet
+./otc_capture --outdir captures --ip 192.168.0.101 --serial 26054106  # direct, no scan
 ./otc_capture --help
 ```
 
@@ -98,13 +99,29 @@ sudo cp otc_capture /usr/local/bin/
 | Option | Default | Meaning |
 |--------|---------|---------|
 | `--serial N` | `0` (first found) | Camera serial number |
-| `--network CIDR` | `192.168.0.0/24` | Ethernet subnet to scan |
+| `--network CIDR` | `192.168.0.0/24` | Ethernet subnet to scan (discovery) |
+| `--ip ADDR` | — | Connect directly to this camera IP, skipping discovery (requires `--serial`) |
+| `--port N` | `50101` | Local UDP port the camera streams to |
 | `--outdir DIR` | `./captures` | Output directory |
 | `--count N` | `1` | Number of frames to capture |
 | `--interval-ms MS` | `1000` | Delay between captures |
 | `--timeout-s S` | `30` | How long to wait for valid data |
 | `--csv` | off | Also write per-pixel °C as CSV |
 | `--raw` | off | Also write raw `float32` (`.f32`) |
+
+#### Direct connect vs. discovery (`--ip`)
+
+By default the tool **discovers** the camera by scanning `--network` (a UDP
+broadcast enumeration over that subnet) and then connects by serial. `--ip`
+instead connects **directly** to a known camera address and skips discovery
+entirely — it just needs `--serial` too (the SDK connects directly only when a
+serial is supplied; a zero serial forces enumeration).
+
+This matters for containerized/routed setups: broadcast discovery can't cross a
+NAT'd Docker bridge, which is one reason the Compose setup uses host networking.
+With `--ip` the capture reaches a routable camera address without broadcast, so
+the pipeline can run on a non-host network (e.g. a macvlan or routed L3 path)
+where only unicast to the camera works.
 
 ### Reading the raw temperature file
 

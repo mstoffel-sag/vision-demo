@@ -29,7 +29,9 @@
 #include "otcsdk/enumeration/EnumerationManager.h"
 #include "otcsdk/IRImager.h"
 #include "otcsdk/IRImagerClient.h"
+#include "otcsdk/IRImagerConfig.h"
 #include "otcsdk/IRImagerFactory.h"
+#include "otcsdk/communication/net/IpAddress.h"
 #include "otcsdk/ImageBuilder.h"
 #include "otcsdk/Exceptions.h"
 #include "otcsdk/common/ThermalFrame.h"
@@ -113,11 +115,16 @@ static bool write_png(const std::string& path, const unsigned char* rgb, int w, 
 class CaptureClient : public IRImagerClient
 {
 public:
-  explicit CaptureClient(unsigned long serial)
-      : _imager{IRImagerFactory::getInstance().create("native")}
+  // Connect via subnet enumeration (serial 0 = first device detected).
+  explicit CaptureClient(unsigned long serial) : CaptureClient()
   {
-    _imager->addClient(this);
     _imager->connect(serial);
+  }
+
+  // Connect directly to a known Ethernet camera, skipping device discovery.
+  explicit CaptureClient(const IRImagerConfig& config) : CaptureClient()
+  {
+    _imager->connect(config);
   }
 
   ~CaptureClient() override
@@ -151,6 +158,14 @@ public:
   }
 
 private:
+  // Shared construction: create the native imager and register as its client
+  // before either connect() overload runs.
+  CaptureClient()
+      : _imager{IRImagerFactory::getInstance().create("native")}
+  {
+    _imager->addClient(this);
+  }
+
   std::shared_ptr<IRImager> _imager;
   std::mutex _mtx;
   FrameEvent _latest;
@@ -251,6 +266,11 @@ static void usage(const char* prog)
       "Usage: %s [options]\n"
       "  --serial N         Camera serial number (0 = first detected, default 0)\n"
       "  --network CIDR     Ethernet subnet to scan (default 192.168.0.0/24)\n"
+      "  --ip ADDR          Connect directly to this camera IP, skipping the subnet\n"
+      "                     scan/broadcast discovery. Requires --serial. Use when\n"
+      "                     discovery cannot reach the camera, e.g. across a routed\n"
+      "                     or macvlan Docker network.\n"
+      "  --port N           Local UDP port the camera streams to (default 50101)\n"
       "  --outdir DIR       Output directory (default ./captures)\n"
       "  --count N          Number of frames to capture (default 1)\n"
       "  --interval-ms MS   Delay between captures (default 1000)\n"
@@ -266,6 +286,8 @@ int main(int argc, char** argv)
 {
   unsigned long serial = 0;
   std::string network = "192.168.0.0/24";
+  std::string ip_addr;            // if set: direct Ethernet connect, no discovery
+  int port = 50101;               // local UDP port the camera streams to
   std::string outdir = "captures";
   int count = 1;
   int interval_ms = 1000;
@@ -278,6 +300,8 @@ int main(int argc, char** argv)
     auto next = [&]() { return (i + 1 < argc) ? argv[++i] : ""; };
     if (a == "--serial") serial = std::strtoul(next(), nullptr, 10);
     else if (a == "--network") network = next();
+    else if (a == "--ip") ip_addr = next();
+    else if (a == "--port") port = std::atoi(next());
     else if (a == "--outdir") outdir = next();
     else if (a == "--count") count = std::atoi(next());
     else if (a == "--interval-ms") interval_ms = std::atoi(next());
@@ -290,11 +314,36 @@ int main(int argc, char** argv)
   }
 
   Sdk::init(Verbosity::Warning, Verbosity::Off, argv[0]);
-  EnumerationManager::getInstance().addEthernetDetector(network);
 
   CaptureClient* client = nullptr;
-  try { client = new CaptureClient(serial); }
+  try
+  {
+    if (!ip_addr.empty())
+    {
+      // Direct connect to a known camera IP: no subnet scan, no broadcast
+      // discovery. The SDK connects directly only when a serial number is
+      // given (a zero serial forces enumeration), so --ip needs --serial.
+      if (serial == 0)
+      {
+        std::fprintf(stderr, "--ip requires --serial (direct connect needs the camera's serial number)\n");
+        return 2;
+      }
+      IRImagerConfig cfg;
+      cfg.serialNumber = serial;
+      cfg.connectionInterface = "ethernet";
+      cfg.ipAddress = IpAddress(ip_addr);   // throws on a malformed address
+      cfg.port = static_cast<unsigned short>(port);
+      client = new CaptureClient(cfg);
+    }
+    else
+    {
+      // Default: discover the camera by scanning the given subnet.
+      EnumerationManager::getInstance().addEthernetDetector(network);
+      client = new CaptureClient(serial);
+    }
+  }
   catch (const SDKException& ex) { std::fprintf(stderr, "Connect failed: %s\n", ex.what()); return 1; }
+  catch (const std::exception& ex) { std::fprintf(stderr, "Connect failed: %s\n", ex.what()); return 1; }
 
   client->runAsync();
   std::printf("Connected to %s (S/N %lu). Waiting for shutter flag to open...\n",
