@@ -1,0 +1,48 @@
+name: vision-demo
+
+# Runs the full thermal workflow in one container: capture a frame from the
+# Optris camera (otc_capture) -> ONNX inference -> publish to Cumulocity via an
+# EXTERNAL thin-edge.io container. See docker/Dockerfile and README for details.
+#
+#   cp .env.example .env      # set your thin-edge host + SDK version
+#   docker compose up --build
+#
+# Prerequisite: a thin-edge.io container connected to your Cumulocity tenant,
+# with its MQTT (1883) and Cumulocity HTTP proxy (8001) reachable — on the same
+# host that means localhost (this service uses host networking).
+
+services:
+  pipeline:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        # Optris Thermal Camera SDK — github.com/Optris/otcsdk_downloads/releases
+        OTCSDK_VERSION: ${OTCSDK_VERSION:-11.3.0}
+        OTCSDK_UBUNTU: ${OTCSDK_UBUNTU:-24.04}
+    image: vision-demo-pipeline:latest
+
+    # Host networking is required so otc_capture can discover/reach the Optris
+    # camera over Ethernet (subnet scan + UDP stream), and so the host's
+    # thin-edge MQTT broker (1883) and Cumulocity HTTP proxy (8001) are
+    # reachable on localhost.
+    network_mode: host
+
+    volumes:
+      # Edit these on the host — the runner hot-reloads on change every cycle
+      # (mirrors pushing config via Cumulocity Configuration Management).
+      # NOTE: mqtt_host/mqtt_port in pipeline.json control where the runner
+      # publishes; keep them pointed at your thin-edge broker (localhost).
+      - ./pipeline/config/pipeline.json:/opt/tedge-pipeline/config/pipeline.json
+      - ./pipeline/processors/preprocessor.py:/opt/tedge-pipeline/processors/preprocessor.py
+      - ./pipeline/processors/postprocessor.py:/opt/tedge-pipeline/processors/postprocessor.py
+      # Persist captured frames and the SDK's per-camera calibration cache
+      # (the calibration download only needs to happen once).
+      - captures:/opt/tedge-pipeline/data/captures
+      - optris-calib:/root/.config/optris
+
+    restart: unless-stopped
+
+volumes:
+  captures:
+  optris-calib:

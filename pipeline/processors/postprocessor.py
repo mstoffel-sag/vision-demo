@@ -18,11 +18,11 @@ Standardized metrics (published every cycle via the runner):
 """
 
 import io
-import os
 import json
+import uuid
 import logging
-import subprocess
-import tempfile
+import urllib.request
+import urllib.error
 import numpy as np
 from datetime import datetime, timezone
 
@@ -123,6 +123,7 @@ def handle_output(config, model_outputs, metadata, mqtt_client):
         img_bytes=img_bytes,
         img_filename=f"{frame_id}_alert.jpg",
         mqtt_client=mqtt_client,
+        settings=settings,
     )
 
     # ── Raise the Cumulocity alarm (stays active until temp drops back below threshold) ──
@@ -140,62 +141,115 @@ def handle_output(config, model_outputs, metadata, mqtt_client):
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
-def _publish_event_with_image(event_type, text, fragment, img_bytes, img_filename,
-                                mqtt_client):
+# Resolved once and cached — the device's Cumulocity managed-object id, needed
+# as the `source` when creating events over the REST proxy.
+_source_id_cache = None
+
+
+def _proxy_base(settings):
+    """Base URL of thin-edge's local Cumulocity HTTP proxy (auth is injected by
+    thin-edge, so no credentials are needed here)."""
+    return settings.get("c8y_proxy_url", "http://127.0.0.1:8001/c8y").rstrip("/")
+
+
+def _http_json(url, method="GET", payload=None, timeout=20):
+    """Small JSON helper over urllib (no third-party deps)."""
+    headers = {"Accept": "application/json"}
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return json.loads(raw) if raw else {}
+
+
+def _resolve_source_id(settings):
+    """Find this device's managed-object id via the c8y proxy.
+
+    The external id can be set explicitly (settings["c8y_device_external_id"]);
+    otherwise it is discovered from the proxy's authenticated device user, whose
+    name is `device_<externalId>` for thin-edge certificate-based devices.
     """
-    Publish a Cumulocity event with an attached image using `tedge upload c8y`.
-    Falls back to MQTT (without image) if the upload fails.
+    global _source_id_cache
+    if _source_id_cache:
+        return _source_id_cache
+
+    base = _proxy_base(settings)
+    ext_type = settings.get("c8y_external_id_type", "c8y_Serial")
+    ext_id = settings.get("c8y_device_external_id")
+
+    if not ext_id:
+        user_name = _http_json(f"{base}/user/currentUser").get("userName", "")
+        ext_id = user_name[len("device_"):] if user_name.startswith("device_") else user_name
+    if not ext_id:
+        raise RuntimeError("could not determine device external id from c8y proxy")
+
+    ident = _http_json(f"{base}/identity/externalIds/{ext_type}/{ext_id}")
+    _source_id_cache = ident["managedObject"]["id"]
+    return _source_id_cache
+
+
+def _attach_binary(base, event_id, img_bytes, img_filename, timeout=20):
+    """Attach a JPEG to an existing event as multipart/form-data."""
+    boundary = "----visiondemo" + uuid.uuid4().hex
+    meta = json.dumps({"name": img_filename, "type": "image/jpeg"}).encode("utf-8")
+    b = boundary.encode("utf-8")
+    body = b"".join([
+        b"--", b, b"\r\n",
+        b'Content-Disposition: form-data; name="object"\r\n',
+        b"Content-Type: application/json\r\n\r\n", meta, b"\r\n",
+        b"--", b, b"\r\n",
+        b'Content-Disposition: form-data; name="file"; filename="',
+        img_filename.encode("utf-8"), b'"\r\n',
+        b"Content-Type: image/jpeg\r\n\r\n", img_bytes, b"\r\n",
+        b"--", b, b"--\r\n",
+    ])
+    req = urllib.request.Request(
+        f"{base}/event/events/{event_id}/binaries",
+        data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    urllib.request.urlopen(req, timeout=timeout).read()
+
+
+def _publish_event_with_image(event_type, text, fragment, img_bytes, img_filename,
+                                mqtt_client, settings):
+    """
+    Publish a Cumulocity event with an attached image via thin-edge's local
+    Cumulocity HTTP proxy (no `tedge` CLI needed): create the event, then attach
+    the JPEG. Falls back to a plain MQTT event (without image) on any failure.
     """
     if img_bytes is None:
         log.warning("No image to attach — falling back to MQTT")
         mqtt_client.publish_event(event_type, text, fragment)
         return
 
-    tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", suffix=".jpg", prefix="thermal_", delete=False
-        ) as tmp:
-            tmp.write(img_bytes)
-            tmp_path = tmp.name
+        base = _proxy_base(settings)
+        source_id = _resolve_source_id(settings)
+        event = _http_json(
+            f"{base}/event/events/",
+            method="POST",
+            payload={
+                "source": {"id": source_id},
+                "type": event_type,
+                "text": text,
+                "time": datetime.now(timezone.utc).isoformat(),
+                event_type: fragment,
+            },
+        )
+        _attach_binary(base, event["id"], img_bytes, img_filename)
+        log.info(f"Event uploaded with image ({len(img_bytes) // 1024} KB) via c8y proxy")
 
-        json_payload = {event_type: fragment}
-
-        cmd = [
-            "tedge", "upload", "c8y",
-            "--file", tmp_path,
-            "--mime-type", "image/jpeg",
-            "--type", event_type,
-            "--text", text,
-            "--json", json.dumps(json_payload),
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-
-        if result.returncode == 0:
-            log.info(f"Event uploaded with image ({len(img_bytes) // 1024} KB)")
-        else:
-            log.warning(
-                f"tedge upload failed (code {result.returncode}): "
-                f"{result.stderr.strip()[:200]} — falling back to MQTT"
-            )
-            mqtt_client.publish_event(event_type, text, fragment)
-
-    except FileNotFoundError:
-        log.warning("tedge CLI not found — falling back to MQTT")
-        mqtt_client.publish_event(event_type, text, fragment)
-    except subprocess.TimeoutExpired:
-        log.warning("tedge upload timed out — falling back to MQTT")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:200] if hasattr(e, "read") else ""
+        log.warning(f"c8y proxy upload failed (HTTP {e.code}): {detail} — falling back to MQTT")
         mqtt_client.publish_event(event_type, text, fragment)
     except Exception as e:
-        log.error(f"Upload error: {e} — falling back to MQTT")
+        log.warning(f"c8y proxy upload failed ({e}) — falling back to MQTT")
         mqtt_client.publish_event(event_type, text, fragment)
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
 
 
 def _render_annotated_image(metadata, bbox, max_temp, settings):

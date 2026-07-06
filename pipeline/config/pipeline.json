@@ -39,6 +39,11 @@
     "c8y_event_type": "c8y_ThermalAlert",
     "c8y_event_text": "Thermal threshold exceeded on monitored equipment",
     "c8y_alarm_type": "c8y_ThermalAlarm",
-    "c8y_alarm_severity": "major"
+    "c8y_alarm_severity": "major",
+
+    "_comment_upload": "--- Alert-image upload via thin-edge's local Cumulocity HTTP proxy (no tedge CLI). Leave device external id blank to auto-detect from the proxy's device user. ---",
+    "c8y_proxy_url": "http://127.0.0.1:8001/c8y",
+    "c8y_external_id_type": "c8y_Serial",
+    "c8y_device_external_id": ""
   }
 }

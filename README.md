@@ -203,6 +203,84 @@ otc_find_devices -e -a 192.168.0.0/24
 
 ---
 
+## Run the whole thing with Docker Compose
+
+`docker-compose.yml` + `docker/Dockerfile` build a single image that runs
+**both halves of the workflow in one container**: it compiles `otc_capture`,
+builds the ONNX model, and runs the
+[onnx-pipeline-runner](https://github.com/Cumulocity-IoT/onnx-pipeline-runner)
+loop (capture → ONNX inference → Cumulocity). It is deliberately one service,
+not two — the runner drives the capture itself every cycle, and the camera only
+allows a single client at a time, so a separate long-running capture process
+would just fight the runner for the device.
+
+```bash
+cp .env.example .env          # set the Optris SDK version
+docker compose up --build
+```
+
+### What you need first
+
+- **thin-edge.io running on the host**, connected to your Cumulocity tenant.
+  This compose does *not* bootstrap thin-edge. With host networking the
+  container reaches its MQTT broker on `localhost:1883` (where the runner
+  publishes measurements/events/alarms) and its Cumulocity HTTP proxy on
+  `localhost:8001`. The postprocessor uploads alert images by calling that
+  proxy directly (create event → attach JPEG) — no `tedge` CLI and no device
+  certificate are needed in the container, because the proxy injects auth on
+  the host. Override the proxy URL / device external id via the `c8y_proxy_url`
+  and `c8y_device_external_id` settings in `pipeline.json` if needed (the device
+  is auto-detected from the proxy otherwise). If the proxy is unreachable,
+  alerts still publish over MQTT — just without the attached image.
+- The **Optris camera on the same Ethernet subnet** as the host. The pipeline
+  container uses `network_mode: host`, so it scans the host's interfaces —
+  set `capture_network` / `camera_serial` in `pipeline/config/pipeline.json`
+  to match your camera.
+- The **Optris SDK release must be reachable** at build time — the Dockerfile
+  downloads `otcsdk-<version>-ubuntu-<ubuntu>-<arch>.deb` from
+  [Optris' GitHub releases](https://github.com/Optris/otcsdk_downloads/releases).
+  Pick the version in `.env`.
+
+### Configuration
+
+| Where | What |
+|---|---|
+| `.env` | Optris SDK version + Ubuntu base (build args). |
+| `pipeline/config/pipeline.json` | The live use-case config — device/equipment info, `capture_network`, `temp_threshold_celsius`, and `mqtt_host`/`mqtt_port` (**point these at your thin-edge broker, localhost**). |
+| `pipeline/processors/*.py` | Pre/post-processors. |
+
+`pipeline.json` and both processors are **bind-mounted**, and the runner
+hot-reloads them each cycle — edit on the host and the change takes effect
+without a rebuild (the same behavior as pushing config via Cumulocity). The
+compiled `otc_capture` binary and `model.onnx` are baked into the image; rebuild
+(`docker compose build`) after changing `otc_capture.cpp` or the model
+resolution.
+
+### Multi-arch
+
+BuildKit selects the SDK `.deb` and Python wheels for the target architecture.
+Building natively on a 64-bit Raspberry Pi (`aarch64`) just works; from an x86
+machine, cross-build with `docker buildx build --platform linux/arm64 ...`.
+
+### Released image
+
+Pushing a `v*` tag also publishes a multi-arch (amd64 + arm64) image to GHCR at
+`ghcr.io/<owner>/vision-demo` (see [.github/workflows/build.yml](.github/workflows/build.yml)).
+To run the release instead of building locally, point the compose service at it:
+
+```bash
+# docker-compose.yml → services.pipeline
+#   image: ghcr.io/<owner>/vision-demo:latest   # and drop the `build:` block
+docker compose up
+```
+
+> **Watching it run:** `docker compose logs -f pipeline` shows one line per
+> cycle (`Cycle N | NORMAL/ALERT | pre=… inf=… post=…`). If the runner can't
+> reach the thin-edge MQTT broker at startup it exits and restarts — check that
+> thin-edge is running on the host and `mqtt_host`/`mqtt_port` are correct.
+
+---
+
 ## Cumulocity thermal-alert pipeline (optional)
 
 `pipeline/` turns `otc_capture` into a monitoring service: on a fixed interval it
