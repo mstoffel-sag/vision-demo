@@ -222,19 +222,33 @@ otc_find_devices -e -a 192.168.0.0/24
 
 ## Run the whole thing with Docker Compose
 
-`docker-compose.yml` + `docker/Dockerfile` build a single image that runs
-**both halves of the workflow in one container**: it compiles `otc_capture`,
-builds the ONNX model, and runs the
+A single image runs **both halves of the workflow in one container**:
+`otc_capture` grabs a frame, the
 [onnx-pipeline-runner](https://github.com/Cumulocity-IoT/onnx-pipeline-runner)
-loop (capture → ONNX inference → Cumulocity). It is deliberately one service,
+loop does capture → ONNX inference → Cumulocity. It is deliberately one service,
 not two — the runner drives the capture itself every cycle, and the camera only
 allows a single client at a time, so a separate long-running capture process
 would just fight the runner for the device.
 
+There are two compose files:
+
+| File | What it does |
+|---|---|
+| `docker-compose.yml` | **Pulls the pre-built image** from GHCR (`ghcr.io/mstoffel-sag/vision-demo:latest`, published by CI on each `v*` release). Default. |
+| `docker-compose.build.yml` | **Builds the image locally** from source (compiles `otc_capture` against the Optris SDK, builds the ONNX model). |
+
 ```bash
+# Run the latest published image (fetches it online):
+docker compose up -d
+
+# …or build everything locally from source instead:
 cp .env.example .env          # set the Optris SDK version
-docker compose up --build
+docker compose -f docker-compose.build.yml up --build
 ```
+
+The GHCR package inherits the repo's visibility; if it is private, run
+`docker login ghcr.io` first. Override the pulled image with the `PIPELINE_IMAGE`
+env var (e.g. pin a tag: `PIPELINE_IMAGE=ghcr.io/mstoffel-sag/vision-demo:0.0.5`).
 
 ### What you need first
 
@@ -253,25 +267,40 @@ docker compose up --build
   container uses `network_mode: host`, so it scans the host's interfaces —
   set `capture_network` / `camera_serial` in `pipeline/config/pipeline.json`
   to match your camera.
-- The **Optris SDK release must be reachable** at build time — the Dockerfile
-  downloads `otcsdk-<version>-ubuntu-<ubuntu>-<arch>.deb` from
-  [Optris' GitHub releases](https://github.com/Optris/otcsdk_downloads/releases).
-  Pick the version in `.env`.
+- **Only when building locally** (`docker-compose.build.yml`): the Optris SDK
+  release must be reachable — the Dockerfile downloads
+  `otcsdk-<version>-ubuntu-<ubuntu>-<arch>.deb` from
+  [Optris' GitHub releases](https://github.com/Optris/otcsdk_downloads/releases);
+  pick the version in `.env`. The pulled image already bundles it.
 
 ### Configuration
 
 | Where | What |
 |---|---|
-| `.env` | Optris SDK version + Ubuntu base (build args). |
+| `.env` | Optris SDK version + Ubuntu base — **build only** (`docker-compose.build.yml`). |
+| `PIPELINE_IMAGE` env | Override the pulled image/tag (`docker-compose.yml`). |
 | `pipeline/config/pipeline.json` | The live use-case config — device/equipment info, `capture_network`, `temp_threshold_celsius`, and `mqtt_host`/`mqtt_port` (**point these at your thin-edge broker, localhost**). |
 | `pipeline/processors/*.py` | Pre/post-processors. |
 
-`pipeline.json` and both processors are **bind-mounted**, and the runner
-hot-reloads them each cycle — edit on the host and the change takes effect
-without a rebuild (the same behavior as pushing config via Cumulocity). The
-compiled `otc_capture` binary and `model.onnx` are baked into the image; rebuild
-(`docker compose build`) after changing `otc_capture.cpp` or the model
-resolution.
+`pipeline.json` and both processors are **bind-mounted** by both compose files,
+and the runner hot-reloads them each cycle — edit on the host and the change
+takes effect without a rebuild/re-pull (the same behavior as pushing config via
+Cumulocity). The compiled `otc_capture` binary and `model.onnx` are baked into
+the image; to change `otc_capture.cpp`, rebuild with
+`docker compose -f docker-compose.build.yml build` (or cut a new release).
+
+> **Model ↔ resolution coupling.** The baked `model.onnx` is generated for the
+> default 384×240 frame and 6×8 grid. Those must match `frame_width`,
+> `frame_height`, `grid_rows`, and `grid_cols` in `pipeline.json` — if you change
+> them, the baked model's input shape no longer fits and inference fails. Rather
+> than rebuild the image, build a matching model and mount it over the baked one
+> (both compose files have a commented `./pipeline/model.onnx` volume for this;
+> the runner hot-reloads it):
+>
+> ```bash
+> python3 pipeline/build_thermal_model.py --height H --width W \
+>     --grid-rows R --grid-cols C --output pipeline/model.onnx
+> ```
 
 ### Multi-arch
 
@@ -281,15 +310,11 @@ machine, cross-build with `docker buildx build --platform linux/arm64 ...`.
 
 ### Released image
 
-Pushing a `v*` tag also publishes a multi-arch (amd64 + arm64) image to GHCR at
-`ghcr.io/<owner>/vision-demo` (see [.github/workflows/build.yml](.github/workflows/build.yml)).
-To run the release instead of building locally, point the compose service at it:
-
-```bash
-# docker-compose.yml → services.pipeline
-#   image: ghcr.io/<owner>/vision-demo:latest   # and drop the `build:` block
-docker compose up
-```
+Pushing a `v*` tag publishes a multi-arch (amd64 + arm64) image to GHCR at
+`ghcr.io/mstoffel-sag/vision-demo` (see
+[.github/workflows/build.yml](.github/workflows/build.yml)). `docker-compose.yml`
+already pulls `:latest` from there — that's the default `docker compose up -d`
+path above. Pin a specific release with `PIPELINE_IMAGE`.
 
 > **Watching it run:** `docker compose logs -f pipeline` shows one line per
 > cycle (`Cycle N | NORMAL/ALERT | pre=… inf=… post=…`). If the runner can't

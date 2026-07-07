@@ -1,29 +1,25 @@
 name: vision-demo
 
-# Runs the full thermal workflow in one container: capture a frame from the
-# Optris camera (otc_capture) -> ONNX inference -> publish to Cumulocity via
-# thin-edge.io running on the host.
+# Same as docker-compose.yml, but BUILDS the image locally from source
+# (compiles otc_capture against the Optris SDK and builds the ONNX model)
+# instead of pulling the published image from GHCR.
 #
-# This file PULLS the pre-built multi-arch image from GHCR (published by CI on
-# each v* release). To build the image locally from source instead, use:
-#
+#   cp .env.example .env      # pick the Optris SDK version
 #   docker compose -f docker-compose.build.yml up --build
-#
-# Fetch and run the latest published image:
-#
-#   docker compose up -d
-#
-# (The GHCR package inherits the repo's visibility; if it is private, run
-#  `docker login ghcr.io` first. Override the image/tag with PIPELINE_IMAGE.)
 #
 # Prerequisite: thin-edge.io running on the host, connected to Cumulocity, with
 # MQTT (1883) and the Cumulocity HTTP proxy (8001) reachable on localhost.
 
 services:
   pipeline:
-    image: ${PIPELINE_IMAGE:-ghcr.io/mstoffel-sag/vision-demo:latest}
-    # Always re-pull so `up` fetches the latest published image.
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        # Optris Thermal Camera SDK — github.com/Optris/otcsdk_downloads/releases
+        OTCSDK_VERSION: ${OTCSDK_VERSION:-11.3.0}
+        OTCSDK_UBUNTU: ${OTCSDK_UBUNTU:-24.04}
+    image: vision-demo-pipeline:local
 
     # Host networking so otc_capture can discover/reach the Optris camera over
     # Ethernet (subnet scan + UDP stream), and so the host's thin-edge MQTT
