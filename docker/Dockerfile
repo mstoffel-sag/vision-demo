@@ -89,12 +89,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # they link only libusb-1.0 + libudev (plus base glibc/libstdc++/z). So rather
 # than `apt install ./otcsdk.deb` — which drags in ~450MB of gcc/cmake/mesa/llvm
 # — extract the SDK's files directly (libs, CLI tools, and the norm/*.prn
-# calibration data otc_capture needs) and install just the two real runtime
-# libraries. Drop the static lib and bundled PDF, which serve no runtime purpose.
+# calibration data otc_capture needs) and install just the real runtime deps.
+#
+# Runtime deps:
+#   libusb-1.0-0, libudev1 — linked by otc_capture/libotcsdk (per ldd).
+#   wget                   — NOT a linked lib: the SDK exec()s `wget` at runtime
+#                            to download a camera's calibration files (it is a
+#                            Depends of the .deb for exactly this reason). Without
+#                            it the SDK logs "wget: not found" and produces no
+#                            valid temperature data. ca-certificates (kept for the
+#                            pip layer above) lets that HTTPS download succeed.
+# Drop the static lib and bundled PDF, which serve no runtime purpose.
 # The .deb is bind-mounted from the builder, so it never becomes an image layer.
 RUN --mount=type=bind,from=builder,source=/opt/otcsdk.deb,target=/tmp/otcsdk.deb \
     apt-get update \
-    && apt-get install -y --no-install-recommends libusb-1.0-0 libudev1 \
+    && apt-get install -y --no-install-recommends libusb-1.0-0 libudev1 wget \
     && dpkg -x /tmp/otcsdk.deb / \
     && rm -f /usr/lib/libotcsdk_static.a '/usr/share/otcsdk/Quick Start Guide.pdf' \
     && ldconfig \
