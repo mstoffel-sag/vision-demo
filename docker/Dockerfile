@@ -80,14 +80,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get autoremove -y --purge \
     && rm -rf /var/lib/apt/lists/*
 
-# Optris SDK runtime libraries (libotcsdk + deps + otc_find_devices/otc_version).
-# Reuse the .deb downloaded in the builder stage — avoids a second download and
-# keeps curl out of the runtime image. apt still resolves the SDK's own deps.
-COPY --from=builder /opt/otcsdk.deb /tmp/otcsdk.deb
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends /tmp/otcsdk.deb \
+# Optris SDK runtime.
+#
+# The .deb declares a full build toolchain (gcc, g++, cmake, build-essential),
+# -dev header packages, and an OpenGL dev stack (freeglut3-dev, libglew-dev,
+# which pull in mesa + llvm) as hard Depends. None of that is needed to *run*
+# the already-compiled otc_capture: `ldd otc_capture` / `ldd libotcsdk.so` show
+# they link only libusb-1.0 + libudev (plus base glibc/libstdc++/z). So rather
+# than `apt install ./otcsdk.deb` — which drags in ~450MB of gcc/cmake/mesa/llvm
+# — extract the SDK's files directly (libs, CLI tools, and the norm/*.prn
+# calibration data otc_capture needs) and install just the two real runtime
+# libraries. Drop the static lib and bundled PDF, which serve no runtime purpose.
+# The .deb is bind-mounted from the builder, so it never becomes an image layer.
+RUN --mount=type=bind,from=builder,source=/opt/otcsdk.deb,target=/tmp/otcsdk.deb \
+    apt-get update \
+    && apt-get install -y --no-install-recommends libusb-1.0-0 libudev1 \
+    && dpkg -x /tmp/otcsdk.deb / \
+    && rm -f /usr/lib/libotcsdk_static.a '/usr/share/otcsdk/Quick Start Guide.pdf' \
     && ldconfig \
-    && rm -rf /var/lib/apt/lists/* /tmp/otcsdk.deb
+    && rm -rf /var/lib/apt/lists/*
 
 # Generic ONNX pipeline engine (checked into this repo).
 COPY docker/pipeline_runner.py /opt/tedge-pipeline/pipeline_runner.py
