@@ -42,10 +42,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Optris Thermal Camera SDK — provides otcsdk headers + libotcsdk + CLI tools.
 # `apt install ./file.deb` resolves the SDK's own runtime dependencies.
-RUN curl -fSL -o /tmp/otcsdk.deb "$OTCSDK_URL" \
+# Keep the .deb around so the runtime stage can reuse it (copied via
+# `COPY --from=builder`) instead of re-downloading — no curl needed at runtime.
+RUN curl -fSL -o /opt/otcsdk.deb "$OTCSDK_URL" \
     && apt-get update \
-    && apt-get install -y --no-install-recommends /tmp/otcsdk.deb \
-    && rm -rf /var/lib/apt/lists/* /tmp/otcsdk.deb
+    && apt-get install -y --no-install-recommends /opt/otcsdk.deb \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 # Compile the native capture tool (same command as build.sh).
@@ -64,27 +66,25 @@ RUN python3 build_thermal_model.py \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM ubuntu:${UBUNTU_VERSION} AS runtime
 
-ARG TARGETARCH
-ARG OTCSDK_VERSION=11.3.0
-ARG OTCSDK_UBUNTU=24.04
-ARG OTCSDK_DEB=otcsdk-${OTCSDK_VERSION}-ubuntu-${OTCSDK_UBUNTU}-${TARGETARCH}.deb
-ARG OTCSDK_URL=https://github.com/Optris/otcsdk_downloads/releases/download/v${OTCSDK_VERSION}/${OTCSDK_DEB}
-
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
-# Python stack. numpy/matplotlib/pillow come from apt (prebuilt, avoids slow
-# source builds on arm64); onnxruntime + paho-mqtt from pip (manylinux wheels
-# exist for both amd64 and arm64).
+# Python stack. numpy/pillow come from apt (prebuilt, avoids slow source builds
+# on arm64); onnxruntime + paho-mqtt from pip (manylinux wheels exist for both
+# amd64 and arm64). Alert images are rendered with Pillow (no matplotlib).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl \
-        python3 python3-pip python3-numpy python3-matplotlib python3-pil \
+        ca-certificates \
+        python3 python3-pip python3-numpy python3-pil \
     && pip3 install --no-cache-dir --break-system-packages onnxruntime paho-mqtt \
+    && apt-get purge -y python3-pip \
+    && apt-get autoremove -y --purge \
     && rm -rf /var/lib/apt/lists/*
 
 # Optris SDK runtime libraries (libotcsdk + deps + otc_find_devices/otc_version).
-RUN curl -fSL -o /tmp/otcsdk.deb "$OTCSDK_URL" \
-    && apt-get update \
+# Reuse the .deb downloaded in the builder stage — avoids a second download and
+# keeps curl out of the runtime image. apt still resolves the SDK's own deps.
+COPY --from=builder /opt/otcsdk.deb /tmp/otcsdk.deb
+RUN apt-get update \
     && apt-get install -y --no-install-recommends /tmp/otcsdk.deb \
     && ldconfig \
     && rm -rf /var/lib/apt/lists/* /tmp/otcsdk.deb

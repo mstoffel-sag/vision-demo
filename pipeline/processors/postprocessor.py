@@ -27,20 +27,17 @@ import numpy as np
 from datetime import datetime, timezone
 
 try:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    HAS_MPL = True
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PIL = True
 except ImportError:
-    HAS_MPL = False
+    HAS_PIL = False
 
 log = logging.getLogger("postprocessor")
 
-if not HAS_MPL:
+if not HAS_PIL:
     log.warning(
-        "matplotlib not available — alert images will NOT be attached to events. "
-        "Fix: sudo apt-get install -y python3-matplotlib python3-pil"
+        "Pillow not available — alert images will NOT be attached to events. "
+        "Fix: sudo apt-get install -y python3-pil"
     )
 
 
@@ -252,55 +249,106 @@ def _publish_event_with_image(event_type, text, fragment, img_bytes, img_filenam
         mqtt_client.publish_event(event_type, text, fragment)
 
 
+# matplotlib's "inferno" colormap, sampled at 11 evenly spaced anchor points
+# (position 0.0 → 1.0, RGB in 0..1). np.interp between these reproduces the
+# perceptually-uniform ramp closely enough for an alert thumbnail, without
+# pulling in the whole matplotlib dependency. black → purple → magenta → orange → pale yellow.
+_INFERNO_ANCHORS = np.array([
+    [0.001462, 0.000466, 0.013866],
+    [0.087411, 0.044556, 0.224813],
+    [0.258234, 0.038571, 0.406485],
+    [0.416331, 0.090203, 0.432943],
+    [0.578304, 0.148039, 0.404411],
+    [0.735683, 0.215906, 0.330245],
+    [0.865006, 0.316822, 0.226055],
+    [0.954506, 0.468744, 0.099874],
+    [0.987622, 0.645320, 0.039886],
+    [0.964394, 0.843848, 0.273391],
+    [0.988362, 0.998364, 0.644924],
+])
+_INFERNO_POS = np.linspace(0.0, 1.0, len(_INFERNO_ANCHORS))
+
+
+def _inferno_rgb(norm):
+    """Map a normalized (0..1) 2-D array to an (H, W, 3) uint8 inferno image."""
+    channels = [np.interp(norm, _INFERNO_POS, _INFERNO_ANCHORS[:, c]) for c in range(3)]
+    return (np.stack(channels, axis=-1) * 255.0).astype(np.uint8)
+
+
+def _load_font(size):
+    """Scalable default font (Pillow >= 10 supports the size arg); fall back to
+    the tiny bitmap default on older Pillow."""
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
 def _render_annotated_image(metadata, bbox, max_temp, settings):
     """Render annotated thermal image as JPEG bytes (with bounding box and temperature label)."""
-    if not HAS_MPL:
+    if not HAS_PIL:
         return None
 
     temp_matrix = metadata.get("temp_matrix")
     if temp_matrix is None:
         return None
 
-    fig, ax = plt.subplots(1, 1, figsize=(6, 4.5), dpi=80)
+    temp_matrix = np.asarray(temp_matrix, dtype=np.float32)
     # Scale off this frame's own temperature spread (1st/99th percentile, robust to a
     # few outlier hot pixels) instead of a fixed range. A hardcoded vmin here previously
-    # sat above typical ambient background temperature, so imshow clipped the whole
-    # background to solid black and only the already-flagged hot region showed any color.
+    # sat above typical ambient background temperature, so the whole background clipped
+    # to solid black and only the already-flagged hot region showed any color.
     vmin = float(np.percentile(temp_matrix, 1))
     vmax = float(np.percentile(temp_matrix, 99))
     if vmax - vmin < 1.0:
         vmax = vmin + 1.0
-    ax.imshow(temp_matrix, cmap="inferno", vmin=vmin, vmax=vmax)
+    norm = np.clip((temp_matrix - vmin) / (vmax - vmin), 0.0, 1.0)
 
-    bw = bbox["bottomRightX"] - bbox["topLeftX"]
-    bh = bbox["bottomRightY"] - bbox["topLeftY"]
-    rect = patches.Rectangle(
-        (bbox["topLeftX"], bbox["topLeftY"]), bw, bh,
-        linewidth=2, edgecolor="red", facecolor="none",
-    )
-    ax.add_patch(rect)
+    img = Image.fromarray(_inferno_rgb(norm), "RGB")
 
-    cx = (bbox["topLeftX"] + bbox["bottomRightX"]) / 2
-    cy = (bbox["topLeftY"] + bbox["bottomRightY"]) / 2
-    ax.plot(cx, cy, "r+", markersize=14, markeredgewidth=2)
+    # Upscale the (small) thermal frame to a readable thumbnail; scale bbox/labels
+    # to match. Target ~480px wide, mirroring the old matplotlib figure size.
+    src_w, src_h = img.size
+    scale = max(1.0, 480.0 / src_w)
+    out_w, out_h = int(round(src_w * scale)), int(round(src_h * scale))
+    img = img.resize((out_w, out_h), Image.BILINEAR)
 
-    ax.annotate(
-        f"{max_temp:.1f}°C",
-        xy=(cx, bbox["topLeftY"] - 2),
-        fontsize=11, color="white", fontweight="bold",
-        ha="center", va="bottom",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="red", alpha=0.9),
-    )
+    draw = ImageDraw.Draw(img, "RGBA")
 
-    ax.set_title(
-        f"{settings.get('equipment_name', '')} - {settings.get('equipment_id', '')}",
-        fontsize=9, color="gray",
-    )
-    ax.axis("off")
-    plt.tight_layout(pad=0.5)
+    x0, y0 = bbox["topLeftX"] * scale, bbox["topLeftY"] * scale
+    x1, y1 = bbox["bottomRightX"] * scale, bbox["bottomRightY"] * scale
+    draw.rectangle([x0, y0, x1, y1], outline=(255, 0, 0, 255), width=2)
+
+    # Center crosshair.
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    arm = 7
+    draw.line([(cx - arm, cy), (cx + arm, cy)], fill=(255, 0, 0, 255), width=2)
+    draw.line([(cx, cy - arm), (cx, cy + arm)], fill=(255, 0, 0, 255), width=2)
+
+    # Temperature label on a red badge, centered above the box.
+    label = f"{max_temp:.1f}°C"
+    font = _load_font(16)
+    tb = draw.textbbox((0, 0), label, font=font)
+    tw, th = tb[2] - tb[0], tb[3] - tb[1]
+    pad = 4
+    lx = min(max(cx - tw / 2 - pad, 0), out_w - tw - 2 * pad)
+    ly = max(y0 - th - 3 * pad, 0)
+    draw.rectangle([lx, ly, lx + tw + 2 * pad, ly + th + 2 * pad],
+                   fill=(220, 0, 0, 230))
+    draw.text((lx + pad - tb[0], ly + pad - tb[1]), label,
+              fill=(255, 255, 255, 255), font=font)
+
+    # Title strip (equipment name - id) top-left, with a dark backing for legibility.
+    title = f"{settings.get('equipment_name', '')} - {settings.get('equipment_id', '')}".strip(" -")
+    if title:
+        tfont = _load_font(13)
+        ttb = draw.textbbox((0, 0), title, font=tfont)
+        ttw, tth = ttb[2] - ttb[0], ttb[3] - ttb[1]
+        draw.rectangle([0, 0, ttw + 8, tth + 8], fill=(0, 0, 0, 140))
+        draw.text((4 - ttb[0], 4 - ttb[1]), title,
+                  fill=(220, 220, 220, 255), font=tfont)
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="jpeg", dpi=80, bbox_inches="tight")
-    plt.close(fig)
+    img.save(buf, format="JPEG", quality=85)
     buf.seek(0)
     return buf.read()
