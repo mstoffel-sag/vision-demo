@@ -14,6 +14,13 @@ entrypoint.sh mount starts a container with no capture process, and the
 preprocessor -- which only reads frames off disk -- then fails every cycle once
 the leftover frames pass frame_max_age_s. The first ~2 minutes look healthy.
 
+With --expect-tag vX.Y.Z it additionally asserts that the deployment copy pins
+that exact release. The deployment compose names an explicit version rather than
+:latest, because a device resolves an image reference it already holds to
+whatever is stored locally -- so a floating tag turns an in-place update into a
+silent no-op. That only works if the pin is bumped with the release, hence the
+check.
+
 Exits non-zero and prints what differs. Deliberately dependency-free (no PyYAML)
 so it runs anywhere python3 does.
 """
@@ -27,6 +34,8 @@ DEPLOY = "docker-compose_vision_demo.yml"
 
 # `- <source>:<target>` or `- <source>:<target>:ro`, ignoring commented-out lines.
 VOLUME_RE = re.compile(r"^\s*-\s+(?P<src>[^:\s#]+):(?P<dst>/[^:\s]+)(?::(?P<opts>[a-z,]+))?\s*$")
+# `image: ${PIPELINE_IMAGE:-ghcr.io/owner/name:vX.Y.Z}` -> the pinned tag.
+IMAGE_RE = re.compile(r"^\s*image:.*?:(?P<tag>[^:}\s]+)\s*\}?\s*$")
 
 
 def parse(path):
@@ -43,6 +52,17 @@ def parse(path):
     return mounts, network_mode
 
 
+def pinned_tag(path):
+    """The image tag the deployment compose pins, or None if it cannot be read."""
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        m = IMAGE_RE.match(line)
+        if m:
+            return m.group("tag")
+    return None
+
+
 def main():
     root = Path(__file__).resolve().parent.parent
     for f in (DEV, DEPLOY):
@@ -54,6 +74,19 @@ def main():
     dep_mounts, dep_net = parse(root / DEPLOY)
 
     problems = []
+
+    expect = None
+    if "--expect-tag" in sys.argv:
+        expect = sys.argv[sys.argv.index("--expect-tag") + 1]
+        actual = pinned_tag(root / DEPLOY)
+        if actual is None:
+            problems.append(f"{DEPLOY}: could not read a pinned image tag")
+        elif actual != expect:
+            problems.append(
+                f"{DEPLOY} pins {actual!r} but this release is {expect!r} -- "
+                f"bump the image tag in the same commit as the release tag, or "
+                f"devices installing this artifact will keep running {actual}"
+            )
 
     if not dev_mounts:
         problems.append(f"{DEV}: parsed zero mounts -- the check itself is broken")
@@ -76,17 +109,20 @@ def main():
         problems.append(f"network_mode differs: {DEV}={dev_net!r}, {DEPLOY}={dep_net!r}")
 
     if problems:
-        print("compose files out of sync:\n", file=sys.stderr)
+        print("compose check failed:\n", file=sys.stderr)
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
-        print(
-            f"\nBoth files must mount the same container-side paths in the same order.\n"
-            f"Host paths differ on purpose ({DEPLOY} uses absolute /opt/vision_demo/...\n"
-            f"because tedge-container-plugin runs it from its own directory).",
-            file=sys.stderr,
-        )
+        if dev_mounts != dep_mounts or dev_net != dep_net:
+            print(
+                f"\nBoth files must mount the same container-side paths in the same order.\n"
+                f"Host paths differ on purpose ({DEPLOY} uses absolute /opt/vision_demo/...\n"
+                f"because tedge-container-plugin runs it from its own directory).",
+                file=sys.stderr,
+            )
         return 1
 
+    if expect:
+        print(f"{DEPLOY} pins {expect} \u2014 matches this release")
     print(f"compose files in sync -- {len(dev_mounts)} mounts, network_mode={dev_net}:")
     for m in dev_mounts:
         print(f"  {m}")

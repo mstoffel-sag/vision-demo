@@ -258,6 +258,42 @@ and brings the project up.
 > instead — it is the source of truth, and it has to be kept in step with
 > `docker-compose.yml`.
 
+#### The image tag is pinned, on purpose
+
+`docker-compose_vision_demo.yml` names an explicit release
+(`ghcr.io/mstoffel-sag/vision-demo:v0.0.9`), not `:latest`. A device resolves an
+image reference it already holds to whatever is stored locally, so with a
+floating tag an in-place update changes nothing: the reference is identical, no
+pull happens, and the install reports success while the old image keeps running.
+Naming a version the device does not have forces the pull.
+
+It also makes rollback expressible — redeploy an artifact naming the previous
+tag — which `:latest` cannot represent at all.
+
+**So a release is two steps, in one commit:**
+
+```bash
+# 1. bump the pin in docker-compose_vision_demo.yml to the version you are about
+#    to cut, and commit it
+# 2. tag and push
+git tag -a v0.1.0 -m "..." && git push origin v0.1.0
+```
+
+CI enforces this: on a `v*` tag, `scripts/check-compose-sync.py --expect-tag`
+fails the build if the artifact pins a different version than the tag, and the
+`release` job depends on it. Without that guard a release would publish an image
+that the deployment artifact never asks any device to install.
+
+`docker-compose.yml` deliberately keeps `:latest` — it is the local development
+file and pairs the floating tag with `pull_policy: always`, so it does fetch the
+newest image on every `up`.
+
+> **Note on disk.** CI has no layer cache, so each release shares no layers with
+> the previous one and the pull needs room for the full image. If the device is
+> short on space, remove the software item and reinstall rather than updating in
+> place — removal drops the old image first, which both frees the space and
+> guarantees the pull.
+
 It differs from `docker-compose.yml` in three deliberate ways, documented in
 the file's own header: `version: "3.7"` with no `name:`/`pull_policy:` (the
 device runs docker-compose 1.29.2, which rejects those Compose-spec keys),
