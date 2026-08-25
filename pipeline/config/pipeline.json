@@ -21,7 +21,7 @@
     "equipment_name": "Drive Motor Unit 07",
     "camera_model": "Optris Xi410",
 
-    "_comment_capture": "--- otc_capture settings (github.com/mstoffel-sag/vision-demo) ---",
+    "_comment_capture": "--- otc_capture settings (github.com/mstoffel-sag/vision-demo). These configure the long-lived capture process started by the entrypoint, so they are read at CONTAINER START ONLY -- restart the container after changing one; a config hot-reload is not enough. ---",
     "capture_binary": "/usr/local/bin/otc_capture",
     "capture_network": "192.168.0.0/24",
     "_comment_camera_ip": "Set camera_ip (and a non-zero camera_serial) to connect directly and skip the subnet scan. Leave camera_ip empty to discover via capture_network (the default).",
@@ -29,6 +29,12 @@
     "camera_port": 50101,
     "camera_serial": 0,
     "capture_timeout_s": 60,
+    "_comment_capture_interval": "How often the held-open capture process writes a frame. Lower = fresher frames for each pipeline cycle, at the cost of more disk churn. This is NOT the pipeline cycle rate (capture_interval_sec, above).",
+    "capture_interval_ms": 5000,
+
+    "_comment_frames": "--- Frame freshness (read live, hot-reloaded) ---",
+    "frame_max_age_s": 120,
+    "frame_wait_timeout_s": 90,
     "keep_frames": 5,
 
     "_comment_model": "--- Model parameters (match your ONNX model / camera resolution) ---",

@@ -225,10 +225,17 @@ otc_find_devices -e -a 192.168.0.0/24
 A single image runs **both halves of the workflow in one container**:
 `otc_capture` grabs a frame, the
 [onnx-pipeline-runner](https://github.com/Cumulocity-IoT/onnx-pipeline-runner)
-loop does capture → ONNX inference → Cumulocity. It is deliberately one service,
-not two — the runner drives the capture itself every cycle, and the camera only
-allows a single client at a time, so a separate long-running capture process
-would just fight the runner for the device.
+loop does inference → Cumulocity. It is one service running two processes: a
+long-lived `otc_capture` that holds a single connection to the camera open and
+writes a frame every `capture_interval_ms`, and the runner, whose preprocessor
+reads the newest frame off disk. The camera admits only one client, so exactly
+one process may connect — hence the split, with the preprocessor confined to
+reading files.
+
+Holding the connection open is what keeps the shutter quiet. Reconnecting per
+cycle made the SDK run a startup NUC every time: the flag audibly closed and
+~20 s elapsed before valid data. Held open, the flag only closes on the
+camera's own periodic NUC schedule.
 
 There are two compose files:
 
@@ -339,7 +346,7 @@ use case work.
 | File | Purpose |
 |------|---------|
 | `pipeline/config/pipeline.json` | Device/equipment info, capture settings, alert threshold. |
-| `pipeline/processors/preprocessor.py` | Runs `otc_capture` once per cycle, loads the `_temp.csv` into a tensor. |
+| `pipeline/processors/preprocessor.py` | Loads the newest `_temp.csv` written by the capture process into a tensor. |
 | `pipeline/processors/postprocessor.py` | Applies the threshold, renders the annotated alert image, publishes to Cumulocity. |
 | `pipeline/build_thermal_model.py` | Builds `model.onnx` — feature extraction only (smoothing + per-cell max/average), no threshold logic. |
 
@@ -406,6 +413,12 @@ The checked-in file has placeholder equipment info and paths — set at least:
 |---|---|
 | `capture_binary` | Path to `otc_capture` (e.g. `/usr/local/bin/otc_capture`). |
 | `capture_network` / `camera_serial` | Same as the `--network` / `--serial` capture options. |
+| `capture_interval_ms` | How often the held-open capture process writes a frame (default 5000). Not the pipeline cycle rate — that is `capture_interval_sec`. |
+| `frame_max_age_s` | Fail the cycle rather than infer on a frame older than this (default 120), so a dead capture process surfaces instead of replaying a stale frame. |
+
+> The `capture_*` and `camera_*` settings configure the long-lived capture
+> process, so they are read at **container start only** — restart the container
+> after changing one. Everything else hot-reloads per cycle as before.
 | `frame_width` / `frame_height` | Must match the camera's native resolution and the resolution `model.onnx` was built for (384×240 for the Xi410 above). |
 | `temp_threshold_celsius` | Grid-cell mean temperature (°C) that triggers an alert. |
 | `equipment_id`, `equipment_name`, `location`, `camera_model` | Attached to every alert event/alarm. |
@@ -421,8 +434,8 @@ python3 pipeline/build_thermal_model.py --height 240 --width 384 \
 
 ### How an alert looks
 
-Each cycle, `preprocessor.py` runs `otc_capture --count 1 --csv` and feeds the
-per-pixel temperature CSV into `model.onnx`. If any grid cell's average
+Each cycle, `preprocessor.py` reads the newest per-pixel temperature CSV
+written by the capture process and feeds it into `model.onnx`. If any grid cell's average
 exceeds `temp_threshold_celsius`, `postprocessor.py`:
 
 1. Renders the full frame with `matplotlib` (`inferno` colormap, scaled to

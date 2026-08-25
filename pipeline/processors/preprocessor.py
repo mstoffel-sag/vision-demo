@@ -1,40 +1,51 @@
 """
-Optris Thermal Preprocessor — captures a live frame via otc_capture and
-feeds its per-pixel temperature CSV into the ONNX model.
+Optris Thermal Preprocessor — reads the newest live frame written by the
+long-lived otc_capture process and feeds it into the ONNX model.
 
 Interface contract (required by tedge-pipeline-runner):
     get_input(config, cycle_count) -> dict with "input" and "metadata"
 
 Data source:
-    Runs the `otc_capture` binary (github.com/mstoffel-sag/vision-demo) once
-    per cycle. It connects to the camera over Ethernet, waits for the shutter
-    flag to open, and writes:
+    A single long-lived `otc_capture` process (started by the container
+    entrypoint, see docker/entrypoint.sh) holds one connection to the camera
+    open and writes a frame every `capture_interval_ms`:
         <prefix>.png       false-color picture
         <prefix>_temp.csv  per-pixel temperature in °C (h rows x w cols)
 
-    otc_capture must already be reachable — either on PATH or at the path
-    given by settings["capture_binary"] — and the camera must be on the
-    subnet given by settings["capture_network"].
+    This preprocessor does NOT connect to the camera — it only reads the newest
+    *_temp.csv off disk. That split is deliberate: the camera admits a single
+    client, and reconnecting per cycle made the SDK run a startup NUC every
+    time (audible shutter, ~20s of dead time before valid data). One held-open
+    connection means the flag only closes on the camera's own NUC schedule.
 
 Settings (config["settings"]):
-    capture_binary        str   - path to the otc_capture executable (default: "otc_capture")
-    capture_network       str   - Ethernet CIDR to scan (default: "192.168.0.0/24")
-    camera_ip             str   - if set, connect directly to this camera IP and skip
-                                  the subnet scan (needs camera_serial != 0). Use when
-                                  discovery/broadcast can't reach the camera, e.g. on a
-                                  routed or macvlan Docker network. (default: "" = scan)
-    camera_port           int   - local UDP port the camera streams to (default: 50101)
-    camera_serial         int   - camera serial, 0 = first detected (default: 0)
-    capture_timeout_s     int   - seconds to wait for valid thermal data (default: 30)
-    keep_frames           int   - how many past capture sets to retain on disk (default: 5)
-    frame_width/height    int   - must match the camera's native resolution the
-                                  ONNX model was built for (see build_thermal_model.py)
+    frame_max_age_s       int  - reject frames older than this; guards against
+                                 feeding a stale frame to the model when the
+                                 capture process has died or the camera dropped
+                                 (default: 120)
+    frame_wait_timeout_s  int  - how long to wait for a usable frame before
+                                 giving up. The first cycle after a restart
+                                 waits out the SDK's startup NUC (~20s), so
+                                 keep this comfortably above that (default: 90)
+    keep_frames           int  - how many past capture sets to retain on disk
+                                 (default: 5)
+    frame_width/height    int  - must match the camera's native resolution the
+                                 ONNX model was built for (see build_thermal_model.py)
+
+    Camera settings (capture_binary, camera_ip, camera_port, camera_serial,
+    capture_network, capture_timeout_s, capture_interval_ms) are consumed by
+    the entrypoint at container start, not here — changing one needs a
+    container restart, not just a config hot-reload.
 """
 
-import subprocess
+import time
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
+
+# A CSV whose mtime is younger than this may still be mid-write. otc_capture
+# writes the PNG first and the CSV last, so a fresh CSV is the in-progress one.
+_SETTLE_S = 1.5
 
 
 def _resize_nearest(arr, out_h, out_w):
@@ -53,47 +64,63 @@ def _capture_dir(config):
     return d
 
 
-def _run_capture(settings, out_dir):
-    """Invoke otc_capture for exactly one frame; returns the written *_temp.csv path."""
-    binary = settings.get("capture_binary", "otc_capture")
-    timeout_s = int(settings.get("capture_timeout_s", 30))
+def _try_load(csv_path):
+    """Load a *_temp.csv, or return None if it is not a complete 2-D frame yet."""
+    try:
+        matrix = np.loadtxt(csv_path, delimiter=",", dtype=np.float32)
+    except (ValueError, OSError):
+        return None          # ragged/truncated rows: the writer is mid-file
+    return matrix if matrix.ndim == 2 else None
 
-    cmd = [
-        binary,
-        "--outdir", str(out_dir),
-        "--serial", str(settings.get("camera_serial", 0)),
-        "--timeout-s", str(timeout_s),
-        "--count", "1",
-        "--csv",
-    ]
 
-    # If a camera IP is configured, connect directly (no subnet scan) — needed
-    # when discovery/broadcast can't reach the camera, e.g. across a routed or
-    # macvlan Docker network. Otherwise fall back to scanning capture_network.
-    camera_ip = str(settings.get("camera_ip", "")).strip()
-    if camera_ip:
-        cmd += ["--ip", camera_ip, "--port", str(settings.get("camera_port", 50101))]
-    else:
-        cmd += ["--network", settings.get("capture_network", "192.168.0.0/24")]
+def _newest_settled_frame(out_dir):
+    """Newest fully-written *_temp.csv as (path, matrix, age_s), or None if none yet."""
+    now = time.time()
+    csvs = sorted(out_dir.glob("*_temp.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for csv_path in csvs:
+        age = now - csv_path.stat().st_mtime
+        if age < _SETTLE_S:
+            continue         # still being written; try the one before it
+        matrix = _try_load(csv_path)
+        if matrix is not None:
+            return csv_path, matrix, age
+    return None
 
-    before = {p.name for p in out_dir.glob("*_temp.csv")}
 
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout_s + 15,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"otc_capture failed (code {result.returncode}): "
-            f"{result.stderr.strip() or result.stdout.strip()}"
-        )
+def _wait_for_frame(out_dir, max_age_s, timeout_s):
+    """
+    Poll until a frame newer than `max_age_s` is available; return (path, matrix, age).
 
-    new_files = sorted(
-        (p for p in out_dir.glob("*_temp.csv") if p.name not in before),
-        key=lambda p: p.stat().st_mtime,
-    )
-    if not new_files:
-        raise RuntimeError("otc_capture reported success but wrote no *_temp.csv file")
-    return new_files[-1]
+    A too-old frame is treated as "not ready yet" rather than an immediate
+    failure: the captures volume persists across restarts, so right after one
+    the newest frame on disk is a leftover from the previous run, and the
+    capture process needs its startup NUC (~20s) before writing a fresh one.
+
+    The flip side is that a genuinely dead capture process costs a full
+    `timeout_s` per cycle before the error surfaces. That is the intended
+    trade — the alternative is inferring on a stale frame and raising alarms
+    from temperatures that no longer exist.
+    """
+    deadline = time.monotonic() + timeout_s
+    stale_age = None
+    while True:
+        found = _newest_settled_frame(out_dir)
+        if found is not None:
+            _, _, age = found
+            if age <= max_age_s:
+                return found
+            stale_age = age
+        if time.monotonic() > deadline:
+            if stale_age is not None:
+                raise RuntimeError(
+                    f"newest thermal frame is {stale_age:.0f}s old (max {max_age_s}s) — "
+                    f"the otc_capture process is not producing frames; check the container logs"
+                )
+            raise RuntimeError(
+                f"no thermal frame appeared within {timeout_s}s — "
+                f"is the otc_capture process running? check the container logs"
+            )
+        time.sleep(0.5)
 
 
 def _prune_old_frames(out_dir, keep):
@@ -107,7 +134,7 @@ def _prune_old_frames(out_dir, keep):
 
 def get_input(config, cycle_count):
     """
-    Capture a live thermal frame and prepare it for ONNX inference.
+    Read the newest live thermal frame and prepare it for ONNX inference.
 
     Args:
         config: dict — full pipeline config (including config["settings"])
@@ -121,8 +148,11 @@ def get_input(config, cycle_count):
     settings = config.get("settings", {})
     out_dir = _capture_dir(config)
 
-    csv_path = _run_capture(settings, out_dir)
-    temp_matrix = np.loadtxt(csv_path, delimiter=",", dtype=np.float32)
+    csv_path, temp_matrix, frame_age_s = _wait_for_frame(
+        out_dir,
+        int(settings.get("frame_max_age_s", 120)),
+        int(settings.get("frame_wait_timeout_s", 90)),
+    )
 
     frame_h = int(settings.get("frame_height", temp_matrix.shape[0]))
     frame_w = int(settings.get("frame_width", temp_matrix.shape[1]))
@@ -138,6 +168,7 @@ def get_input(config, cycle_count):
             "timestamp": datetime.now(timezone.utc),
             "frame_id": csv_path.stem,
             "source_file": str(csv_path),
+            "frame_age_s": round(frame_age_s, 1),
             "temp_matrix": temp_matrix,
             "frame_min": float(temp_matrix.min()),
             "frame_max": float(temp_matrix.max()),

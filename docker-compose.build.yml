@@ -32,6 +32,11 @@ services:
       - ./pipeline/config/pipeline.json:/opt/tedge-pipeline/config/pipeline.json
       - ./pipeline/processors/preprocessor.py:/opt/tedge-pipeline/processors/preprocessor.py
       - ./pipeline/processors/postprocessor.py:/opt/tedge-pipeline/processors/postprocessor.py
+      # The entrypoint starts the long-lived otc_capture process, so mounting it
+      # lets camera/capture changes deploy without rebuilding or re-pulling the
+      # image. Unlike the files above it is NOT hot-reloaded — it only runs at
+      # container start, so `docker compose up -d` (recreate) to apply a change.
+      - ./docker/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
       # Optional: override the baked-in model with a locally-built one — it must
       # match frame_width/height + grid_rows/cols in pipeline.json. Build it with
       # pipeline/build_thermal_model.py, then uncomment (the runner hot-reloads):

@@ -3,10 +3,11 @@
 # vision-demo pipeline image
 #
 # One container that performs BOTH halves of the workflow:
-#   1. Capture  — the compiled `otc_capture` tool grabs a thermal frame from
-#                 the Optris camera over Ethernet (driven per-cycle by the
-#                 preprocessor; the camera only allows one client, so capture
-#                 is not a separate service).
+#   1. Capture  — the compiled `otc_capture` tool grabs thermal frames from the
+#                 Optris camera over Ethernet, run by the entrypoint as one
+#                 long-lived process that holds the connection open (the camera
+#                 allows a single client, and reconnecting per frame would make
+#                 the SDK re-run its startup NUC every time).
 #   2. ONNX     — the onnx-pipeline-runner loop:
 #                 preprocess -> ONNX inference -> postprocess, publishing
 #                 measurements/events/alarms to an *external* thin-edge.io
