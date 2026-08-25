@@ -19,7 +19,7 @@ services:
     # reference to the copy it already holds, so a floating tag makes an update
     # a silent no-op. Bump this in the same commit as the release tag; CI checks
     # the two agree. No leading "v": git tag v0.0.9 publishes image tag 0.0.9.
-    image: ${PIPELINE_IMAGE:-ghcr.io/mstoffel-sag/vision-demo:0.0.9}
+    image: ${PIPELINE_IMAGE:-ghcr.io/mstoffel-sag/vision-demo:0.0.10}
 
     # Lets otc_capture reach the camera over Ethernet (subnet scan + UDP stream)
     # and the host's thin-edge MQTT broker / c8y proxy on localhost.
@@ -30,10 +30,9 @@ services:
       - /opt/vision_demo/pipeline/config/pipeline.json:/opt/tedge-pipeline/config/pipeline.json
       - /opt/vision_demo/pipeline/processors/preprocessor.py:/opt/tedge-pipeline/processors/preprocessor.py
       - /opt/vision_demo/pipeline/processors/postprocessor.py:/opt/tedge-pipeline/processors/postprocessor.py
-      # Starts the long-lived otc_capture process. REQUIRED until an image built
-      # from the current docker/entrypoint.sh is released — an older image runs
-      # no capture process, and the preprocessor only reads frames off disk.
-      # Runs at container start only; recreate the container to apply a change.
+      # Starts the long-lived otc_capture process. Baked into the image since
+      # 0.0.9, so this mount is now a convenience — it deploys entrypoint changes
+      # without a rebuild. Runs at container start only; recreate to apply one.
       - /opt/vision_demo/docker/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
       # Optional: override the baked-in model (must match frame_width/height +
       # grid_rows/cols in pipeline.json). Build with build_thermal_model.py:

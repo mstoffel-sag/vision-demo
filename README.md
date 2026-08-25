@@ -267,7 +267,7 @@ directory and brings the project up.
 
 #### The image tag is pinned, on purpose
 
-The artifact names an explicit release (`…/vision-demo:0.0.9`), not `:latest`.
+The artifact names an explicit release (`…/vision-demo:0.0.10`), not `:latest`.
 A device resolves an image reference it already holds to the copy stored
 locally, so with a floating tag an in-place update changes nothing: identical
 reference, no pull, install reports success while the old image keeps running.
