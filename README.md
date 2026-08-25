@@ -237,12 +237,37 @@ cycle made the SDK run a startup NUC every time: the flag audibly closed and
 ~20 s elapsed before valid data. Held open, the flag only closes on the
 camera's own periodic NUC schedule.
 
-There are two compose files:
+There are three compose files:
 
 | File | What it does |
 |---|---|
 | `docker-compose.yml` | **Pulls the pre-built image** from GHCR (`ghcr.io/mstoffel-sag/vision-demo:latest`, published by CI on each `v*` release). Default. |
 | `docker-compose.build.yml` | **Builds the image locally** from source (compiles `otc_capture` against the Optris SDK, builds the ONNX model). |
+| `docker-compose_vision_demo.yml` | **Deploys to a device via Cumulocity** as a thin-edge.io `container-group` software item. Same services and mounts as `docker-compose.yml`; see [below](#deploying-via-cumulocity). |
+
+### Deploying via Cumulocity
+
+Upload `docker-compose_vision_demo.yml` as the artifact of a `container-group`
+software item. On install, tedge-container-plugin materializes it to
+`/opt/tedge-data/tedge-container-plugin/compose/<software-item>/docker-compose.yaml`
+and brings the project up.
+
+> **That file is regenerated from the artifact on every install/update**, so
+> edits made directly on the device are silently discarded on the next
+> deployment. Change `docker-compose_vision_demo.yml` here and re-upload
+> instead — it is the source of truth, and it has to be kept in step with
+> `docker-compose.yml`.
+
+It differs from `docker-compose.yml` in three deliberate ways, documented in
+the file's own header: `version: "3.7"` with no `name:`/`pull_policy:` (the
+device runs docker-compose 1.29.2, which rejects those Compose-spec keys),
+absolute `/opt/vision_demo/...` host paths (the plugin runs the file from its
+own directory, so relative paths would resolve wrongly), and an `extra_hosts`
+block. Everything else should match — including the `entrypoint.sh` mount,
+which is **required** until an image built from the current
+`docker/entrypoint.sh` is released. An older image starts no capture process,
+and the preprocessor only reads frames off disk, so every cycle fails once the
+leftover frames pass `frame_max_age_s`.
 
 ```bash
 # Run the latest published image (fetches it online):
