@@ -38,7 +38,11 @@ services:
     # pull, and makes rollback expressible (redeploy an artifact naming the
     # previous tag). Bump this in the same commit as the release tag -- CI
     # checks the two match.
-    image: ${PIPELINE_IMAGE:-ghcr.io/mstoffel-sag/vision-demo:v0.0.9}
+    #
+    # NOTE the tag has no leading "v". CI tags images via docker/metadata-action
+    # `type=semver,pattern={{version}}`, which publishes 0.0.9 for git tag
+    # v0.0.9. Pinning ":v0.0.9" would fail the pull with `manifest unknown`.
+    image: ${PIPELINE_IMAGE:-ghcr.io/mstoffel-sag/vision-demo:0.0.9}
 
     # Host networking so otc_capture can discover/reach the Optris camera over
     # Ethernet (subnet scan + UDP stream), and so the host's thin-edge MQTT

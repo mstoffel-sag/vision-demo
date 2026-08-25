@@ -261,7 +261,10 @@ and brings the project up.
 #### The image tag is pinned, on purpose
 
 `docker-compose_vision_demo.yml` names an explicit release
-(`ghcr.io/mstoffel-sag/vision-demo:v0.0.9`), not `:latest`. A device resolves an
+(`ghcr.io/mstoffel-sag/vision-demo:0.0.9`), not `:latest`. **Note the image tag
+has no leading `v`** — CI tags images with docker/metadata-action
+`type=semver,pattern={{version}}`, so git tag `v0.0.9` publishes `0.0.9`, `0.0`
+and `latest`. Pinning `:v0.0.9` fails the pull with `manifest unknown`. A device resolves an
 image reference it already holds to whatever is stored locally, so with a
 floating tag an in-place update changes nothing: the reference is identical, no
 pull happens, and the install reports success while the old image keeps running.
@@ -280,8 +283,8 @@ git tag -a v0.1.0 -m "..." && git push origin v0.1.0
 ```
 
 CI enforces this: on a `v*` tag, `scripts/check-compose-sync.py --expect-tag`
-fails the build if the artifact pins a different version than the tag, and the
-`release` job depends on it. Without that guard a release would publish an image
+fails the build if the artifact pins a different version than the tag (it
+normalizes the `v` prefix), and the `release` job depends on it. Without that guard a release would publish an image
 that the deployment artifact never asks any device to install.
 
 `docker-compose.yml` deliberately keeps `:latest` — it is the local development

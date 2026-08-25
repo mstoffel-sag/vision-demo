@@ -78,14 +78,20 @@ def main():
     expect = None
     if "--expect-tag" in sys.argv:
         expect = sys.argv[sys.argv.index("--expect-tag") + 1]
+        # CI passes the git tag (v0.0.9), but the published image tag has no
+        # leading "v": docker/metadata-action uses
+        # `type=semver,pattern={{version}}`, which publishes 0.0.9. Pinning the
+        # git tag verbatim would fail the pull with `manifest unknown`.
+        expect = expect[1:] if re.fullmatch(r"v\d.*", expect) else expect
         actual = pinned_tag(root / DEPLOY)
         if actual is None:
             problems.append(f"{DEPLOY}: could not read a pinned image tag")
         elif actual != expect:
             problems.append(
-                f"{DEPLOY} pins {actual!r} but this release is {expect!r} -- "
+                f"{DEPLOY} pins {actual!r} but this release publishes {expect!r} -- "
                 f"bump the image tag in the same commit as the release tag, or "
-                f"devices installing this artifact will keep running {actual}"
+                f"devices installing this artifact will keep running {actual}. "
+                f"Note the image tag has no leading 'v'."
             )
 
     if not dev_mounts:
