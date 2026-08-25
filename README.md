@@ -242,7 +242,7 @@ There are three compose files:
 | File | What it does |
 |---|---|
 | `docker-compose.yml` | **Pulls the pre-built image** from GHCR (`ghcr.io/mstoffel-sag/vision-demo:latest`, published by CI on each `v*` release). Default. |
-| `docker-compose.build.yml` | **Builds the image locally** from source (compiles `otc_capture` against the Optris SDK, builds the ONNX model). |
+| `docker-compose.build.yml` | **Overrides `docker-compose.yml` to build locally** from source (compiles `otc_capture` against the Optris SDK, builds the ONNX model). Carries only the build stanza — pass both files. |
 | `docker-compose_vision_demo.yml` | **Deploys to a device via Cumulocity** as a thin-edge.io `container-group` software item. Same services and mounts as `docker-compose.yml`; see [below](#deploying-via-cumulocity). |
 
 ### Deploying via Cumulocity
@@ -275,7 +275,7 @@ docker compose up -d
 
 # …or build everything locally from source instead:
 cp .env.example .env          # set the Optris SDK version
-docker compose -f docker-compose.build.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 ```
 
 The GHCR package inherits the repo's visibility; if it is private, run
@@ -319,7 +319,8 @@ and the runner hot-reloads them each cycle — edit on the host and the change
 takes effect without a rebuild/re-pull (the same behavior as pushing config via
 Cumulocity). The compiled `otc_capture` binary and `model.onnx` are baked into
 the image; to change `otc_capture.cpp`, rebuild with
-`docker compose -f docker-compose.build.yml build` (or cut a new release).
+`docker compose -f docker-compose.yml -f docker-compose.build.yml build` (or cut a
+new release).
 
 > **Model ↔ resolution coupling.** The baked `model.onnx` is generated for the
 > default 384×240 frame and 6×8 grid. Those must match `frame_width`,

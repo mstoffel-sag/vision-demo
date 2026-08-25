@@ -1,11 +1,15 @@
-name: vision-demo
-
-# Same as docker-compose.yml, but BUILDS the image locally from source
-# (compiles otc_capture against the Optris SDK and builds the ONNX model)
-# instead of pulling the published image from GHCR.
+# Override for docker-compose.yml that BUILDS the image from source (compiles
+# otc_capture against the Optris SDK and builds the ONNX model) instead of
+# pulling the published one from GHCR.
 #
 #   cp .env.example .env      # pick the Optris SDK version
-#   docker compose -f docker-compose.build.yml up --build
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+#
+# This file deliberately carries ONLY the build stanza. Everything else — host
+# networking, the bind mounts, volumes, restart policy — is inherited from
+# docker-compose.yml, so the mount list has a single definition to keep correct.
+# Compose merges service volumes by container-side path, so nothing is repeated
+# here.
 #
 # Prerequisite: thin-edge.io running on the host, connected to Cumulocity, with
 # MQTT (1883) and the Cumulocity HTTP proxy (8001) reachable on localhost.
@@ -20,33 +24,6 @@ services:
         OTCSDK_VERSION: ${OTCSDK_VERSION:-11.3.0}
         OTCSDK_UBUNTU: ${OTCSDK_UBUNTU:-24.04}
     image: vision-demo-pipeline:local
-
-    # Host networking so otc_capture can discover/reach the Optris camera over
-    # Ethernet (subnet scan + UDP stream), and so the host's thin-edge MQTT
-    # broker (1883) and Cumulocity HTTP proxy (8001) are reachable on localhost.
-    network_mode: host
-
-    volumes:
-      # Edit these on the host — the runner hot-reloads on change every cycle
-      # (mirrors pushing config via Cumulocity Configuration Management).
-      - ./pipeline/config/pipeline.json:/opt/tedge-pipeline/config/pipeline.json
-      - ./pipeline/processors/preprocessor.py:/opt/tedge-pipeline/processors/preprocessor.py
-      - ./pipeline/processors/postprocessor.py:/opt/tedge-pipeline/processors/postprocessor.py
-      # The entrypoint starts the long-lived otc_capture process, so mounting it
-      # lets camera/capture changes deploy without rebuilding or re-pulling the
-      # image. Unlike the files above it is NOT hot-reloaded — it only runs at
-      # container start, so `docker compose up -d` (recreate) to apply a change.
-      - ./docker/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
-      # Optional: override the baked-in model with a locally-built one — it must
-      # match frame_width/height + grid_rows/cols in pipeline.json. Build it with
-      # pipeline/build_thermal_model.py, then uncomment (the runner hot-reloads):
-      # - ./pipeline/model.onnx:/opt/tedge-pipeline/models/model.onnx
-      # Persist captured frames and the SDK's per-camera calibration cache.
-      - captures:/opt/tedge-pipeline/data/captures
-      - optris-calib:/root/.config/optris
-
-    restart: unless-stopped
-
-volumes:
-  captures:
-  optris-calib:
+    # docker-compose.yml sets `pull_policy: always` for the published image;
+    # override it here or Compose would try to pull the local build tag.
+    pull_policy: build

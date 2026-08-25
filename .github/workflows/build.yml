@@ -34,6 +34,21 @@ env:
   UBUNTU_RELEASE: ${{ github.event.inputs.ubuntu_release || '24.04' }}
 
 jobs:
+  # Guards the one piece of duplication that cannot be refactored away:
+  # docker-compose.yml and docker-compose_vision_demo.yml describe the same
+  # deployment for different targets and must mount the same paths. A missing
+  # mount in the deployment copy breaks the device ~2 minutes after a deploy,
+  # long after the install reports success, so catch it here instead.
+  compose-sync:
+    name: compose sync
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check compose files are in sync
+        run: python3 scripts/check-compose-sync.py
+
   build:
     name: build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -114,7 +129,7 @@ jobs:
 
   release:
     name: release
-    needs: [build, model]
+    needs: [build, model, compose-sync]
     # Only run when a version tag (v*) is pushed.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
