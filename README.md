@@ -222,20 +222,16 @@ otc_find_devices -e -a 192.168.0.0/24
 
 ## Run the whole thing with Docker Compose
 
-A single image runs **both halves of the workflow in one container**:
-`otc_capture` grabs a frame, the
+One image, one service, two processes: a long-lived `otc_capture` holding a
+single connection to the camera open and writing a frame every
+`capture_interval_ms`, and the
 [onnx-pipeline-runner](https://github.com/Cumulocity-IoT/onnx-pipeline-runner)
-loop does inference → Cumulocity. It is one service running two processes: a
-long-lived `otc_capture` that holds a single connection to the camera open and
-writes a frame every `capture_interval_ms`, and the runner, whose preprocessor
-reads the newest frame off disk. The camera admits only one client, so exactly
-one process may connect — hence the split, with the preprocessor confined to
-reading files.
+loop, whose preprocessor reads the newest frame off disk and publishes to
+Cumulocity. The camera admits only one client, hence the split.
 
-Holding the connection open is what keeps the shutter quiet. Reconnecting per
-cycle made the SDK run a startup NUC every time: the flag audibly closed and
-~20 s elapsed before valid data. Held open, the flag only closes on the
-camera's own periodic NUC schedule.
+Holding the connection open is what keeps the shutter quiet: reconnecting per
+cycle made the SDK run a startup NUC every time — audible flag, ~20 s before
+valid data. Held open, the flag closes only on the camera's own NUC schedule.
 
 There are three compose files:
 
@@ -244,69 +240,6 @@ There are three compose files:
 | `docker-compose.yml` | **Pulls the pre-built image** from GHCR (`ghcr.io/mstoffel-sag/vision-demo:latest`, published by CI on each `v*` release). Default. |
 | `docker-compose.build.yml` | **Overrides `docker-compose.yml` to build locally** from source (compiles `otc_capture` against the Optris SDK, builds the ONNX model). Carries only the build stanza — pass both files. |
 | `docker-compose_vision_demo.yml` | **Deploys to a device via Cumulocity** as a thin-edge.io `container-group` software item. Same services and mounts as `docker-compose.yml`; see [below](#deploying-via-cumulocity). |
-
-### Deploying via Cumulocity
-
-Upload `docker-compose_vision_demo.yml` as the artifact of a `container-group`
-software item. On install, tedge-container-plugin materializes it to
-`/opt/tedge-data/tedge-container-plugin/compose/<software-item>/docker-compose.yaml`
-and brings the project up.
-
-> **That file is regenerated from the artifact on every install/update**, so
-> edits made directly on the device are silently discarded on the next
-> deployment. Change `docker-compose_vision_demo.yml` here and re-upload
-> instead — it is the source of truth, and it has to be kept in step with
-> `docker-compose.yml`.
-
-#### The image tag is pinned, on purpose
-
-`docker-compose_vision_demo.yml` names an explicit release
-(`ghcr.io/mstoffel-sag/vision-demo:0.0.9`), not `:latest`. **Note the image tag
-has no leading `v`** — CI tags images with docker/metadata-action
-`type=semver,pattern={{version}}`, so git tag `v0.0.9` publishes `0.0.9`, `0.0`
-and `latest`. Pinning `:v0.0.9` fails the pull with `manifest unknown`. A device resolves an
-image reference it already holds to whatever is stored locally, so with a
-floating tag an in-place update changes nothing: the reference is identical, no
-pull happens, and the install reports success while the old image keeps running.
-Naming a version the device does not have forces the pull.
-
-It also makes rollback expressible — redeploy an artifact naming the previous
-tag — which `:latest` cannot represent at all.
-
-**So a release is two steps, in one commit:**
-
-```bash
-# 1. bump the pin in docker-compose_vision_demo.yml to the version you are about
-#    to cut, and commit it
-# 2. tag and push
-git tag -a v0.1.0 -m "..." && git push origin v0.1.0
-```
-
-CI enforces this: on a `v*` tag, `scripts/check-compose-sync.py --expect-tag`
-fails the build if the artifact pins a different version than the tag (it
-normalizes the `v` prefix), and the `release` job depends on it. Without that guard a release would publish an image
-that the deployment artifact never asks any device to install.
-
-`docker-compose.yml` deliberately keeps `:latest` — it is the local development
-file and pairs the floating tag with `pull_policy: always`, so it does fetch the
-newest image on every `up`.
-
-> **Note on disk.** CI has no layer cache, so each release shares no layers with
-> the previous one and the pull needs room for the full image. If the device is
-> short on space, remove the software item and reinstall rather than updating in
-> place — removal drops the old image first, which both frees the space and
-> guarantees the pull.
-
-It differs from `docker-compose.yml` in three deliberate ways, documented in
-the file's own header: `version: "3.7"` with no `name:`/`pull_policy:` (the
-device runs docker-compose 1.29.2, which rejects those Compose-spec keys),
-absolute `/opt/vision_demo/...` host paths (the plugin runs the file from its
-own directory, so relative paths would resolve wrongly), and an `extra_hosts`
-block. Everything else should match — including the `entrypoint.sh` mount,
-which is **required** until an image built from the current
-`docker/entrypoint.sh` is released. An older image starts no capture process,
-and the preprocessor only reads frames off disk, so every cycle fails once the
-leftover frames pass `frame_max_age_s`.
 
 ```bash
 # Run the latest published image (fetches it online):
@@ -321,28 +254,66 @@ The GHCR package inherits the repo's visibility; if it is private, run
 `docker login ghcr.io` first. Override the pulled image with the `PIPELINE_IMAGE`
 env var (e.g. pin a tag: `PIPELINE_IMAGE=ghcr.io/mstoffel-sag/vision-demo:0.0.5`).
 
+### Deploying via Cumulocity
+
+Upload `docker-compose_vision_demo.yml` as the artifact of a `container-group`
+software item. tedge-container-plugin materializes it into its own compose
+directory and brings the project up.
+
+> **It is regenerated from the artifact on every install/update**, so edits made
+> directly on the device are silently discarded. Change the file here and
+> re-upload — it is the source of truth, and must stay in step with
+> `docker-compose.yml`. Its header lists the deliberate differences.
+
+#### The image tag is pinned, on purpose
+
+The artifact names an explicit release (`…/vision-demo:0.0.9`), not `:latest`.
+A device resolves an image reference it already holds to the copy stored
+locally, so with a floating tag an in-place update changes nothing: identical
+reference, no pull, install reports success while the old image keeps running.
+Naming a version the device lacks forces the pull — and makes rollback
+expressible, which `:latest` cannot represent at all.
+
+**The tag has no leading `v`.** CI uses docker/metadata-action
+`type=semver,pattern={{version}}`, so git tag `v0.0.9` publishes `0.0.9`, `0.0`
+and `latest`; pinning `:v0.0.9` fails with `manifest unknown`.
+
+So a release is two steps in one commit — bump the pin, then tag:
+
+```bash
+git tag -a v0.1.0 -m "..." && git push origin v0.1.0
+```
+
+On a `v*` tag, `scripts/check-compose-sync.py --expect-tag` fails the build if
+the artifact pins a different version than the tag, and `release` depends on it.
+Without that guard a release would publish an image no device is asked to
+install. `docker-compose.yml` keeps `:latest` deliberately — it is the dev file
+and pairs the floating tag with `pull_policy: always`.
+
+> **Note on disk.** CI has no layer cache, so each release shares no layers with
+> the previous one and the pull needs room for the whole image. On a
+> space-constrained device, remove the software item and reinstall rather than
+> updating in place — removal drops the old image first.
+
 ### What you need first
 
-- **thin-edge.io running on the host**, connected to your Cumulocity tenant.
-  This compose does *not* bootstrap thin-edge. With host networking the
-  container reaches its MQTT broker on `localhost:1883` (where the runner
-  publishes measurements/events/alarms) and its Cumulocity HTTP proxy on
-  `localhost:8001`. The postprocessor uploads alert images by calling that
-  proxy directly (create event → attach JPEG) — no `tedge` CLI and no device
-  certificate are needed in the container, because the proxy injects auth on
-  the host. Override the proxy URL / device external id via the `c8y_proxy_url`
-  and `c8y_device_external_id` settings in `pipeline.json` if needed (the device
-  is auto-detected from the proxy otherwise). If the proxy is unreachable,
-  alerts still publish over MQTT — just without the attached image.
+- **thin-edge.io running on the host**, connected to your Cumulocity tenant —
+  this compose does *not* bootstrap it. Host networking gives the container its
+  MQTT broker on `localhost:1883` and its Cumulocity HTTP proxy on
+  `localhost:8001`. The postprocessor calls that proxy directly (create event →
+  attach JPEG), so no `tedge` CLI or device certificate is needed in the
+  container — the proxy injects auth on the host. Override with `c8y_proxy_url`
+  / `c8y_device_external_id` in `pipeline.json` if the auto-detected values are
+  wrong. If the proxy is unreachable, alerts still publish over MQTT, without
+  the image.
 - The **Optris camera on the same Ethernet subnet** as the host. The pipeline
   container uses `network_mode: host`, so it scans the host's interfaces —
   set `capture_network` / `camera_serial` in `pipeline/config/pipeline.json`
   to match your camera.
-- **Only when building locally** (`docker-compose.build.yml`): the Optris SDK
-  release must be reachable — the Dockerfile downloads
-  `otcsdk-<version>-ubuntu-<ubuntu>-<arch>.deb` from
-  [Optris' GitHub releases](https://github.com/Optris/otcsdk_downloads/releases);
-  pick the version in `.env`. The pulled image already bundles it.
+- **Only when building locally** (`docker-compose.build.yml`): the Dockerfile
+  downloads `otcsdk-<version>-ubuntu-<ubuntu>-<arch>.deb` from
+  [Optris' GitHub releases](https://github.com/Optris/otcsdk_downloads/releases)
+  — pick the version in `.env`. The pulled image already bundles it.
 
 ### Configuration
 
@@ -353,21 +324,19 @@ env var (e.g. pin a tag: `PIPELINE_IMAGE=ghcr.io/mstoffel-sag/vision-demo:0.0.5`
 | `pipeline/config/pipeline.json` | The live use-case config — device/equipment info, `capture_network`, `temp_threshold_celsius`, and `mqtt_host`/`mqtt_port` (**point these at your thin-edge broker, localhost**). |
 | `pipeline/processors/*.py` | Pre/post-processors. |
 
-`pipeline.json` and both processors are **bind-mounted** by both compose files,
-and the runner hot-reloads them each cycle — edit on the host and the change
-takes effect without a rebuild/re-pull (the same behavior as pushing config via
-Cumulocity). The compiled `otc_capture` binary and `model.onnx` are baked into
-the image; to change `otc_capture.cpp`, rebuild with
-`docker compose -f docker-compose.yml -f docker-compose.build.yml build` (or cut a
-new release).
+`pipeline.json` and both processors are **bind-mounted** and hot-reloaded each
+cycle — edit on the host and the change applies without a rebuild or re-pull.
+The compiled `otc_capture` and `model.onnx` are baked into the image; changing
+`otc_capture.cpp` needs a rebuild
+(`docker compose -f docker-compose.yml -f docker-compose.build.yml build`) or a
+new release.
 
-> **Model ↔ resolution coupling.** The baked `model.onnx` is generated for the
-> default 384×240 frame and 6×8 grid. Those must match `frame_width`,
-> `frame_height`, `grid_rows`, and `grid_cols` in `pipeline.json` — if you change
-> them, the baked model's input shape no longer fits and inference fails. Rather
-> than rebuild the image, build a matching model and mount it over the baked one
-> (both compose files have a commented `./pipeline/model.onnx` volume for this;
-> the runner hot-reloads it):
+> **Model ↔ resolution coupling.** The baked `model.onnx` is built for the
+> default 384×240 frame and 6×8 grid, which must match `frame_width`,
+> `frame_height`, `grid_rows` and `grid_cols` in `pipeline.json` — change them
+> and inference fails on the input shape. Build a matching model and mount it
+> over the baked one instead of rebuilding the image (each compose file has a
+> commented `model.onnx` volume for this; the runner hot-reloads it):
 >
 > ```bash
 > python3 pipeline/build_thermal_model.py --height H --width W \
@@ -384,9 +353,8 @@ machine, cross-build with `docker buildx build --platform linux/arm64 ...`.
 
 Pushing a `v*` tag publishes a multi-arch (amd64 + arm64) image to GHCR at
 `ghcr.io/mstoffel-sag/vision-demo` (see
-[.github/workflows/build.yml](.github/workflows/build.yml)). `docker-compose.yml`
-already pulls `:latest` from there — that's the default `docker compose up -d`
-path above. Pin a specific release with `PIPELINE_IMAGE`.
+[.github/workflows/build.yml](.github/workflows/build.yml)), which is what
+`docker-compose.yml` pulls. Pin a specific release with `PIPELINE_IMAGE`.
 
 > **Watching it run:** `docker compose logs -f pipeline` shows one line per
 > cycle (`Cycle N | NORMAL/ALERT | pre=… inf=… post=…`). If the runner can't
@@ -404,14 +372,13 @@ uploads an annotated snapshot as a `c8y_ThermalAlert` event.
 
 The alarm is republished every alerting cycle (Cumulocity updates the open one
 rather than stacking duplicates), but the **snapshot is uploaded once per alarm
-episode**. A hot spot that stays hot is a single open alarm with a single
-picture, not one JPEG every 30 seconds. Before uploading, the postprocessor asks
-Cumulocity whether an alarm of `c8y_alarm_type` is still open (`ACTIVE` or
-`ACKNOWLEDGED`) on this device — so a container restart mid-alarm does not
-re-send a picture the operator already has, and clearing the alarm in the UI
-while the spot is still hot yields a fresh one. If Cumulocity cannot be reached,
-it falls back to in-process state. Set `alert_image_once_per_alarm` to `false`
-to restore an upload on every alerting cycle.
+episode** — a hot spot that stays hot is one open alarm with one picture, not a
+JPEG every 30 s. Before uploading, the postprocessor asks Cumulocity whether an
+alarm of `c8y_alarm_type` is still open (`ACTIVE` or `ACKNOWLEDGED`), rather
+than trusting a local flag: a container restart mid-alarm then skips the
+duplicate, and clearing the alarm in the UI while the spot is still hot yields a
+fresh picture. If Cumulocity is unreachable it falls back to in-process state.
+Set `alert_image_once_per_alarm` to `false` to upload on every alerting cycle.
 
 It runs on top of **[tedge-pipeline-runner](https://github.com/Cumulocity-IoT/onnx-pipeline-runner)**,
 a generic `Preprocess → ONNX inference → Postprocess` engine for thin-edge.io.
@@ -448,18 +415,17 @@ python3 pipeline/build_thermal_model.py --height 240 --width 384 \
   **Management > Software Repository** in Cumulocity, then install it on the
   device from its **Software** tab. This creates `/opt/tedge-pipeline/` and
   the `tedge-pipeline-runner` systemd service.
-- `python3-numpy` and `python3-matplotlib` on the device (the runner's `.deb`
-  installs these automatically; install manually only if you skip it):
+- `python3-numpy` and `python3-pil` on the device (the runner's `.deb` pulls in
+  numpy; without Pillow, alerts publish without the attached image):
   ```bash
-  sudo apt install python3-numpy python3-matplotlib
+  sudo apt install python3-numpy python3-pil
   ```
 
 ### Deploying the pipeline files
 
 **Production (recommended):** push the four files below via Cumulocity's
-**Configuration** tab on the device — no SSH needed, and future updates work
-the same way. Get `model.onnx` from the [latest
-Release](../../releases/latest) (or build it yourself, above):
+**Configuration** tab on the device — no SSH needed. Get `model.onnx` from the
+[latest Release](../../releases/latest), or build it yourself (above):
 
 | Configuration Type | File to upload |
 |---|---|
@@ -491,15 +457,15 @@ The checked-in file has placeholder equipment info and paths — set at least:
 | `capture_network` / `camera_serial` | Same as the `--network` / `--serial` capture options. |
 | `capture_interval_ms` | How often the held-open capture process writes a frame (default 5000). Not the pipeline cycle rate — that is `capture_interval_sec`. |
 | `frame_max_age_s` | Fail the cycle rather than infer on a frame older than this (default 120), so a dead capture process surfaces instead of replaying a stale frame. |
-
-> The `capture_*` and `camera_*` settings configure the long-lived capture
-> process, so they are read at **container start only** — restart the container
-> after changing one. Everything else hot-reloads per cycle as before.
 | `frame_width` / `frame_height` | Must match the camera's native resolution and the resolution `model.onnx` was built for (384×240 for the Xi410 above). |
 | `temp_threshold_celsius` | Grid-cell mean temperature (°C) that triggers an alert. |
 | `equipment_id`, `equipment_name`, `location`, `camera_model` | Attached to every alert event/alarm. |
 | `c8y_event_type`, `c8y_alarm_type`, `c8y_alarm_severity` | Cumulocity event/alarm types raised on alert. |
 | `alert_image_once_per_alarm` | `true` (default): upload one alert image per alarm episode. `false`: upload one every alerting cycle. |
+
+> The `capture_*` and `camera_*` settings configure the long-lived capture
+> process, so they are read at **container start only** — restart the container
+> after changing one. Everything else hot-reloads per cycle.
 
 If you change `frame_width`/`frame_height` or the alert grid resolution,
 rebuild the model to match:
@@ -512,16 +478,16 @@ python3 pipeline/build_thermal_model.py --height 240 --width 384 \
 ### How an alert looks
 
 Each cycle, `preprocessor.py` reads the newest per-pixel temperature CSV
-written by the capture process and feeds it into `model.onnx`. If any grid cell's average
-exceeds `temp_threshold_celsius`, `postprocessor.py`:
+written by the capture process and feeds it into `model.onnx`. If any grid
+cell's average exceeds `temp_threshold_celsius`, `postprocessor.py`:
 
-1. Renders the full frame with `matplotlib` (`inferno` colormap, scaled to
-   that frame's own 1st/99th-percentile temperatures — not a fixed range, so
-   the background stays visible instead of clipping to black) with a red box
-   and `+` marker over the hottest grid cell.
-2. Uploads it via `tedge upload c8y` as a `c8y_ThermalAlert` event, and raises
-   a `c8y_ThermalAlarm` that clears automatically once the temperature drops
-   back below threshold.
+1. Raises a `c8y_ThermalAlarm`, republished each alerting cycle and cleared
+   automatically once the temperature drops back below threshold.
+2. Renders the frame with Pillow (`inferno` colormap scaled to that frame's own
+   1st/99th-percentile temperatures, so the background stays visible instead of
+   clipping to black) with a red box over the hottest grid cell, and uploads it
+   as a `c8y_ThermalAlert` event through thin-edge's Cumulocity HTTP proxy —
+   once per alarm episode, see above.
 
 ---
 
@@ -534,38 +500,27 @@ exceeds `temp_threshold_celsius`, `postprocessor.py`:
   fetches calibration from the camera once and caches it in `~/.config/optris/`.
 - **`error while loading shared libraries: libotcsdk.so`** — the SDK isn't
   installed (or not in the loader path). Install the `.deb`, then `sudo ldconfig`.
-- **Python bindings segfault** — the SDK's Python 3 binding (`import
-  optris.otcsdk`) crashes in `Sdk.init()` under Python 3.14 on this system. The
-  native C++ path used here is unaffected. If you need Python, run it under the
-  Python version the binding was built against, or report the crash to Optris.
-- **`otc_capture` PNG is a flat, near-uniform color — no visible detail** — the
-  `ImageBuilder` auto-scaling filter starts every frame from a hardcoded
-  `-20..20 °C` seed range and only converges slowly (see `otc_capture.cpp`,
-  `save_frame()`). For scenes well outside that range, or with a single
-  outlier hot pixel, this crushes real detail into a thin sliver of the
-  palette. `otc_capture.cpp` already sets `Sigma3` scaling and disables the
-  filter (`setTemperatureScalingFilterFactor(0.0f)`) to avoid this — if you
-  see it regardless, check you're running the binary built from the current
-  `otc_capture.cpp`, not an older prebuilt one.
+- **Python bindings segfault** — the SDK's Python binding (`import
+  optris.otcsdk`) crashes in `Sdk.init()` under Python 3.14. The native C++ path
+  used here is unaffected; run Python under the version the binding was built
+  against.
+- **`otc_capture` PNG is a flat, near-uniform color** — the `ImageBuilder`
+  auto-scaling filter seeds from a hardcoded `-20..20 °C` range and converges
+  slowly, crushing detail for scenes outside it. `otc_capture.cpp` already sets
+  `Sigma3` scaling and disables the filter
+  (`setTemperatureScalingFilterFactor(0.0f)`); if you still see it, you are
+  running an older prebuilt binary.
 - **`--fast-start` gives wildly wrong absolute temperatures** — it skips the
-  startup NUC/recalibration for a faster first frame, at the documented cost
-  of accuracy. We measured the same static scene reading ~120 °C with
-  `--fast-start` vs. ~25 °C without it. Don't use it for anything that reads
-  absolute temperatures (including the `pipeline/` alert threshold) — it's
-  only reasonable for a quick "is the camera even connected" sanity check.
-- **Cumulocity alert image background is solid black** — this is a
-  `postprocessor.py` rendering issue, not `otc_capture`: an earlier version
-  used a fixed `vmin`/`vmax` color range that sat above typical ambient
-  temperature, so `matplotlib` clipped the whole background to black and only
-  the already-flagged hot region showed any color. The current version scales
-  off each frame's own 1st/99th-percentile temperatures instead. If you still
-  see this, confirm `/opt/tedge-pipeline/processors/postprocessor.py` matches
-  `pipeline/processors/postprocessor.py` in this repo (Configuration
-  Management pushes and manual `scp`/`cp` deploys are easy to let drift out of
-  sync) and that the service was restarted after the update.
-- **Device claim: `busy with another client`** — another client (another
-  workstation, a viewer app, or an unclean previous exit) is already holding
-  the camera's connection. `otc_find_devices` reporting `available` doesn't
-  always mean the SDK's own claim tracking agrees. Close whatever else is
-  connected; if nothing obvious is, power-cycling the camera clears a stuck
-  claim.
+  startup NUC, at the documented cost of accuracy: the same static scene read
+  ~120 °C with it vs. ~25 °C without. Use it only as a "is the camera
+  connected" check, never where absolute temperatures matter (including the
+  `pipeline/` alert threshold).
+- **Cumulocity alert image background is solid black** — an old
+  `postprocessor.py` with a fixed color range that sat above ambient, clipping
+  the background. The current one scales per frame. Confirm the deployed
+  `/opt/tedge-pipeline/processors/postprocessor.py` matches this repo's copy
+  (pushed config and manual `scp` drift easily) and restart the service.
+- **Device claim: `busy with another client`** — something else holds the
+  camera's connection (a viewer app, another workstation, an unclean exit);
+  `otc_find_devices` reporting `available` doesn't mean the SDK's claim tracking
+  agrees. Close it, or power-cycle the camera to clear a stuck claim.

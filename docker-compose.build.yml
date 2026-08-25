@@ -1,18 +1,11 @@
-# Override for docker-compose.yml that BUILDS the image from source (compiles
-# otc_capture against the Optris SDK and builds the ONNX model) instead of
-# pulling the published one from GHCR.
+# Override that BUILDS the image from source (compiles otc_capture against the
+# Optris SDK, builds the ONNX model) instead of pulling it from GHCR:
 #
 #   cp .env.example .env      # pick the Optris SDK version
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 #
-# This file deliberately carries ONLY the build stanza. Everything else — host
-# networking, the bind mounts, volumes, restart policy — is inherited from
-# docker-compose.yml, so the mount list has a single definition to keep correct.
-# Compose merges service volumes by container-side path, so nothing is repeated
-# here.
-#
-# Prerequisite: thin-edge.io running on the host, connected to Cumulocity, with
-# MQTT (1883) and the Cumulocity HTTP proxy (8001) reachable on localhost.
+# Carries ONLY the build stanza — networking, mounts, volumes and restart policy
+# are inherited from docker-compose.yml, so the mount list has one definition.
 
 services:
   pipeline:

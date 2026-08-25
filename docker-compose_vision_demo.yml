@@ -1,70 +1,42 @@
-# Deployment copy of docker-compose.yml, for pushing to a device as a
-# thin-edge.io `container-group` software item via Cumulocity.
+# Deployment artifact: upload as a thin-edge.io `container-group` software item
+# in Cumulocity. The plugin materializes it to its own compose directory and
+# brings it up, REGENERATING it on every install — so device-side edits are
+# discarded. This file is the source of truth and must stay in step with
+# docker-compose.yml (scripts/check-compose-sync.py enforces that).
 #
-# Upload this file as the artifact of a `container-group` software item. On
-# install, tedge-container-plugin materializes it to
-#   /opt/tedge-data/tedge-container-plugin/compose/<software-item>/docker-compose.yaml
-# and brings the project up. That file is REGENERATED from this artifact on
-# every install/update, so edits made directly on the device are discarded —
-# this file is the source of truth, and it must be kept in step with
-# docker-compose.yml.
+# Deliberate differences: `version: "3.7"` and no `name:`/`pull_policy:` (the
+# device runs docker-compose 1.29.2, which rejects those keys), absolute host
+# paths (the plugin runs this from its own directory, so ./ would misresolve),
+# `extra_hosts`, and a pinned image tag.
 #
-# Deliberate differences from docker-compose.yml (keep the rest identical):
-#
-#   1. `version: "3.7"`, and no `name:` / `pull_policy:` keys — the device runs
-#      docker-compose 1.29.2, which rejects those Compose-spec keys. Without
-#      pull_policy, `up` will not re-pull on its own; the plugin handles
-#      fetching the image when the software item is installed.
-#   2. Absolute host paths (/opt/vision_demo/...) instead of ./ — the plugin
-#      runs this file from its own compose directory, so relative paths would
-#      resolve against that directory, not the deployed files.
-#   3. `extra_hosts` — lets the container resolve the host by name in addition
-#      to reaching it over host networking.
-#   4. A pinned image tag instead of :latest — see the comment on `image:` below.
-#      Bump it in the same commit as the release tag; CI checks the two agree.
-#
-# Prerequisite: thin-edge.io running on the host, connected to Cumulocity, with
-# MQTT (1883) and the Cumulocity HTTP proxy (8001) reachable on localhost, and
-# the pipeline files deployed to /opt/vision_demo/ on the device.
+# Prerequisite: thin-edge.io on the host with MQTT (1883) and the Cumulocity
+# proxy (8001) on localhost, and the pipeline files in /opt/vision_demo/.
 version: "3.7"
 
 services:
   pipeline:
-    # PINNED to an explicit release, deliberately not :latest. The device
-    # resolves an image reference it already has to whatever is stored locally,
-    # so a floating tag makes an in-place update a no-op: the reference does not
-    # change, nothing is pulled, and the install reports success while the old
-    # image keeps running. Naming a version the device does not have forces the
-    # pull, and makes rollback expressible (redeploy an artifact naming the
-    # previous tag). Bump this in the same commit as the release tag -- CI
-    # checks the two match.
-    #
-    # NOTE the tag has no leading "v". CI tags images via docker/metadata-action
-    # `type=semver,pattern={{version}}`, which publishes 0.0.9 for git tag
-    # v0.0.9. Pinning ":v0.0.9" would fail the pull with `manifest unknown`.
+    # PINNED, deliberately not :latest — a device resolves an unchanged image
+    # reference to the copy it already holds, so a floating tag makes an update
+    # a silent no-op. Bump this in the same commit as the release tag; CI checks
+    # the two agree. No leading "v": git tag v0.0.9 publishes image tag 0.0.9.
     image: ${PIPELINE_IMAGE:-ghcr.io/mstoffel-sag/vision-demo:0.0.9}
 
-    # Host networking so otc_capture can discover/reach the Optris camera over
-    # Ethernet (subnet scan + UDP stream), and so the host's thin-edge MQTT
-    # broker (1883) and Cumulocity HTTP proxy (8001) are reachable on localhost.
+    # Lets otc_capture reach the camera over Ethernet (subnet scan + UDP stream)
+    # and the host's thin-edge MQTT broker / c8y proxy on localhost.
     network_mode: host
 
     volumes:
-      # Edit these on the device — the runner hot-reloads on change every cycle
-      # (mirrors pushing config via Cumulocity Configuration Management).
+      # Hot-reloaded by the runner every cycle — edit in place on the device.
       - /opt/vision_demo/pipeline/config/pipeline.json:/opt/tedge-pipeline/config/pipeline.json
       - /opt/vision_demo/pipeline/processors/preprocessor.py:/opt/tedge-pipeline/processors/preprocessor.py
       - /opt/vision_demo/pipeline/processors/postprocessor.py:/opt/tedge-pipeline/processors/postprocessor.py
-      # The entrypoint starts the long-lived otc_capture process. REQUIRED until
-      # an image built from the current docker/entrypoint.sh is released: an
-      # older image starts no capture process at all, and the preprocessor —
-      # which only reads frames off disk — would then fail every cycle once the
-      # leftover frames pass frame_max_age_s. Unlike the files above it is NOT
-      # hot-reloaded; it only runs at container start.
+      # Starts the long-lived otc_capture process. REQUIRED until an image built
+      # from the current docker/entrypoint.sh is released — an older image runs
+      # no capture process, and the preprocessor only reads frames off disk.
+      # Runs at container start only; recreate the container to apply a change.
       - /opt/vision_demo/docker/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
-      # Optional: override the baked-in model with a locally-built one — it must
-      # match frame_width/height + grid_rows/cols in pipeline.json. Build it with
-      # pipeline/build_thermal_model.py, then uncomment (the runner hot-reloads):
+      # Optional: override the baked-in model (must match frame_width/height +
+      # grid_rows/cols in pipeline.json). Build with build_thermal_model.py:
       # - /opt/vision_demo/pipeline/model.onnx:/opt/tedge-pipeline/models/model.onnx
       # Persist captured frames and the SDK's per-camera calibration cache.
       - captures:/opt/tedge-pipeline/data/captures
