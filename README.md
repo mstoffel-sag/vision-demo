@@ -402,6 +402,17 @@ captures a frame, runs it through a tiny ONNX model, and — if any grid cell
 exceeds a configured temperature threshold — raises a Cumulocity alarm and
 uploads an annotated snapshot as a `c8y_ThermalAlert` event.
 
+The alarm is republished every alerting cycle (Cumulocity updates the open one
+rather than stacking duplicates), but the **snapshot is uploaded once per alarm
+episode**. A hot spot that stays hot is a single open alarm with a single
+picture, not one JPEG every 30 seconds. Before uploading, the postprocessor asks
+Cumulocity whether an alarm of `c8y_alarm_type` is still open (`ACTIVE` or
+`ACKNOWLEDGED`) on this device — so a container restart mid-alarm does not
+re-send a picture the operator already has, and clearing the alarm in the UI
+while the spot is still hot yields a fresh one. If Cumulocity cannot be reached,
+it falls back to in-process state. Set `alert_image_once_per_alarm` to `false`
+to restore an upload on every alerting cycle.
+
 It runs on top of **[tedge-pipeline-runner](https://github.com/Cumulocity-IoT/onnx-pipeline-runner)**,
 a generic `Preprocess → ONNX inference → Postprocess` engine for thin-edge.io.
 That runner is generic infrastructure you install once; everything in
@@ -488,6 +499,7 @@ The checked-in file has placeholder equipment info and paths — set at least:
 | `temp_threshold_celsius` | Grid-cell mean temperature (°C) that triggers an alert. |
 | `equipment_id`, `equipment_name`, `location`, `camera_model` | Attached to every alert event/alarm. |
 | `c8y_event_type`, `c8y_alarm_type`, `c8y_alarm_severity` | Cumulocity event/alarm types raised on alert. |
+| `alert_image_once_per_alarm` | `true` (default): upload one alert image per alarm episode. `false`: upload one every alerting cycle. |
 
 If you change `frame_width`/`frame_height` or the alert grid resolution,
 rebuild the model to match:

@@ -53,6 +53,8 @@
     "_comment_upload": "--- Alert-image upload via thin-edge's local Cumulocity HTTP proxy (no tedge CLI). Leave device external id blank to auto-detect from the proxy's device user. ---",
     "c8y_proxy_url": "http://127.0.0.1:8001/c8y",
     "c8y_external_id_type": "c8y_Serial",
-    "c8y_device_external_id": ""
+    "c8y_device_external_id": "",
+    "_comment_image_rate": "true = upload one alert image per alarm episode (the first hot cycle). Cumulocity is asked whether an alarm of c8y_alarm_type is still open (ACTIVE or ACKNOWLEDGED) before each upload, so clearing the alarm in the UI while the hot spot persists yields a fresh picture. Set false to upload an image every alerting cycle.",
+    "alert_image_once_per_alarm": true
   }
 }

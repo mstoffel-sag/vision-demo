@@ -5,8 +5,12 @@ Interface contract (required by tedge-pipeline-runner):
     handle_output(config, model_outputs, metadata, mqtt_client) -> dict
 
 Actions on alert:
-    1. Render annotated thermal image (JPEG)
-    2. Publish c8y_ThermalAlert event with annotated image attached to Cumulocity
+    1. Raise the c8y_ThermalAlarm alarm (republished every cycle — Cumulocity
+       updates the already-open alarm rather than creating a second one)
+    2. Render an annotated thermal image (JPEG) and publish it as a
+       c8y_ThermalAlert event — but only ONCE per alarm episode. See
+       _should_send_image(): a hot spot that stays hot is one open alarm in
+       Cumulocity, not one picture every 30 seconds.
 
 Standardized metrics (published every cycle via the runner):
     model_score     — the key model output (max temperature in this case)
@@ -42,6 +46,7 @@ if not HAS_PIL:
 
 
 def handle_output(config, model_outputs, metadata, mqtt_client):
+    global _image_sent_this_episode
     settings = config.get("settings", {})
 
     # ── Parse model outputs ──
@@ -68,6 +73,7 @@ def handle_output(config, model_outputs, metadata, mqtt_client):
 
     if not alert:
         mqtt_client.clear_alarm(alarm_type)
+        _image_sent_this_episode = False
         return {"status": "normal", "metrics": metrics}
 
     # ═══════════════════════════════════════════════════════════
@@ -98,11 +104,6 @@ def handle_output(config, model_outputs, metadata, mqtt_client):
         f"({bbox['bottomRightX']},{bbox['bottomRightY']})"
     )
 
-    # ── Render the annotated image ──
-    img_bytes = _render_annotated_image(metadata, bbox, max_temp, settings)
-
-    # ── Publish Cumulocity event with image ──
-    alert_event_type = settings.get("c8y_event_type", "c8y_ThermalAlert")
     alert_fragment = {
         "equipment_id": settings.get("equipment_id", ""),
         "equipment_name": settings.get("equipment_name", ""),
@@ -113,15 +114,21 @@ def handle_output(config, model_outputs, metadata, mqtt_client):
         "frame_id": frame_id,
         "bounding_box": bbox,
     }
-    _publish_event_with_image(
-        event_type=alert_event_type,
-        text=settings.get("c8y_event_text", "Thermal threshold exceeded"),
-        fragment=alert_fragment,
-        img_bytes=img_bytes,
-        img_filename=f"{frame_id}_alert.jpg",
-        mqtt_client=mqtt_client,
-        settings=settings,
-    )
+
+    # ── Publish the annotated image — first cycle of this alarm episode only ──
+    if _should_send_image(settings, alarm_type):
+        _publish_event_with_image(
+            event_type=settings.get("c8y_event_type", "c8y_ThermalAlert"),
+            text=settings.get("c8y_event_text", "Thermal threshold exceeded"),
+            fragment=alert_fragment,
+            img_bytes=_render_annotated_image(metadata, bbox, max_temp, settings),
+            img_filename=f"{frame_id}_alert.jpg",
+            mqtt_client=mqtt_client,
+            settings=settings,
+        )
+        _image_sent_this_episode = True
+    else:
+        log.info("Alarm already open in Cumulocity — skipping duplicate alert image")
 
     # ── Raise the Cumulocity alarm (stays active until temp drops back below threshold) ──
     mqtt_client.publish_alarm(
@@ -141,6 +148,50 @@ def handle_output(config, model_outputs, metadata, mqtt_client):
 # Resolved once and cached — the device's Cumulocity managed-object id, needed
 # as the `source` when creating events over the REST proxy.
 _source_id_cache = None
+
+# Local mirror of "the picture for the current alarm episode has been sent".
+# Only consulted when Cumulocity cannot be asked (proxy down, device offline) —
+# Cumulocity itself is the source of truth, so that a container restart in the
+# middle of an ongoing alarm does not re-send a picture the operator already has.
+_image_sent_this_episode = False
+
+
+def _alarm_is_active(settings, alarm_type):
+    """
+    Is an alarm of this type still open on this device in Cumulocity?
+
+    Returns True/False, or None when the question could not be answered (proxy
+    down, thin-edge buffering while offline, c8y unreachable) so the caller can
+    fall back to local state.
+
+    ACKNOWLEDGED counts as open: an operator who acknowledged the alarm has
+    already seen the picture. Only a CLEARED alarm — whether cleared by this
+    pipeline when the temperature dropped, or by an operator in the UI — ends
+    the episode and lets the next hot frame upload a fresh image.
+    """
+    try:
+        base = _proxy_base(settings)
+        source_id = _resolve_source_id(settings)
+        resp = _http_json(
+            f"{base}/alarm/alarms"
+            f"?source={source_id}&type={alarm_type}"
+            f"&status=ACTIVE,ACKNOWLEDGED&pageSize=1",
+            timeout=10,
+        )
+        return bool(resp.get("alarms"))
+    except Exception as e:
+        log.warning(f"could not query open alarms ({e}) — falling back to local episode state")
+        return None
+
+
+def _should_send_image(settings, alarm_type):
+    """One alert image per alarm episode, unless the operator opted out."""
+    if not settings.get("alert_image_once_per_alarm", True):
+        return True
+    active = _alarm_is_active(settings, alarm_type)
+    if active is None:
+        active = _image_sent_this_episode
+    return not active
 
 
 def _proxy_base(settings):
