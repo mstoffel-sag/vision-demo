@@ -1,0 +1,38 @@
+# relay-auto-open (1/2) — the timer.
+#
+# Watches Cumulocity relay operations, and once one closes the relay, arms a
+# deadline. When the deadline passes it emits the matching OPEN operation on the
+# internal request topic, where the companion flow (emit.toml) publishes it to
+# Cumulocity's operation topic for the mapper to execute.
+#
+# Why two flows: the runtime refuses to let a flow publish to a topic it also
+# subscribes to ("dropping output message ... to prevent an infinite loop"), and
+# this flow must both read from and ultimately write to
+# c8y/devicecontrol/notifications. Splitting the write into a second flow that
+# does not subscribe there is what makes it legal.
+
+version = "0.1.0"
+
+# Relay operations arrive here as JSON (see /etc/tedge/operations/c8y/c8y_Relay).
+# SmartREST (c8y/s/ds) is NOT dispatched to on_fragment handlers, so this is the
+# only topic that carries them.
+input.mqtt.topics = ["c8y/devicecontrol/notifications"]
+
+[config]
+delay_minutes = "${params.delay_minutes}"
+relay_fragment = "${params.relay_fragment}"
+# Must match input.mqtt.topics in emit.toml.
+request_topic = "relay-auto-open/open"
+
+# The interval is the resolution of the deadline check, not the delay itself:
+# the relay opens up to one interval late. 10s is negligible against a delay
+# measured in minutes.
+[[steps]]
+script = "main.js"
+interval = "10s"
+
+# No topic here — the output message carries its own (see main.js).
+[output.mqtt]
+
+[errors.mqtt]
+topic = "te/errors"

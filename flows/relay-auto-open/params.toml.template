@@ -1,0 +1,9 @@
+# How long a relay closed from Cumulocity may stay closed before this flow
+# opens it again. Fractions are allowed (0.5 = 30 seconds). The relay opens up
+# to one check interval late — see the `interval` on the step in flow.toml.
+delay_minutes = 5
+
+# Which operation fragment to watch. c8y_Relay carries a single relayState and
+# drives the first relay output. c8y_RelayArray has a different payload shape
+# (an array of states) and is deliberately NOT handled by this flow.
+relay_fragment = "c8y_Relay"

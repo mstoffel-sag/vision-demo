@@ -1,0 +1,24 @@
+# relay-auto-open (2/2) — the emitter.
+#
+# Publishes what the timer produced onto Cumulocity's operation topic, where the
+# c8y mapper's on_fragment handler for c8y_Relay picks it up and drives the
+# output. This flow exists only because the timer flow cannot publish to a topic
+# it subscribes to; see the header of flow.toml.
+#
+# c8y/devicecontrol/notifications is INBOUND-ONLY across the built-in Cumulocity
+# bridge, so publishing to it actuates the relay locally and sends nothing to
+# the cloud.
+
+version = "0.1.0"
+
+# Must match `request_topic` in flow.toml.
+input.mqtt.topics = ["relay-auto-open/open"]
+
+[[steps]]
+script = "emit.js"
+
+# No topic here — emit.js addresses the message (see its header).
+[output.mqtt]
+
+[errors.mqtt]
+topic = "te/errors"
